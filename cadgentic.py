@@ -12,6 +12,7 @@ Run:
   python cadgentic.py              (poll for tickets until stopped)
   python cadgentic.py ABC-123      (run one ticket now, then exit)
   python cadgentic.py go-live ABC-123   (run /go-live for one ticket now, then exit)
+  python cadgentic.py open ABC-123      (open a run's session in Claude Code)
 """
 
 import asyncio
@@ -622,6 +623,7 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path):
     resume = f"cd {repo} && claude --resume {session_id}"
     if status == "handed_off":
         log.info("  ✓ %s handed off for review", key)
+        log.info("    To review the session: %s", resume)
         notify(f"{key} handed off for review")
     elif status == "planned":
         log.info("  ✓ %s planned: %s", key, PLAN_DIR / f"{key}.md")
@@ -633,6 +635,7 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path):
         notify(f"{key} stopped before the handoff")
     else:
         log.error("  ✗ %s failed: %s", key, detail)
+        log.error("    To pick it up: %s", resume)
         notify(f"{key} needs attention")
 
 
@@ -654,9 +657,9 @@ async def go_live(key: str, repo: Path, seen: str | None):
     mark, words = GO_LIVE_NOTES[status]
     level = {"✗": logging.ERROR, "■": logging.WARNING}.get(mark, logging.INFO)
     log.log(level, "  %s %s %s%s", mark, key, words, f": {detail}" if detail else "")
+    aim = "review the session" if level == logging.INFO else "pick it up"
+    log.log(level, "    To %s: cd %s && claude --resume %s", aim, repo, session_id)
     if mark != "·":
-        if mark != "✓":
-            log.log(level, "    To pick it up: cd %s && claude --resume %s", repo, session_id)
         notify(f"{key} {words}")
 
 
@@ -743,6 +746,25 @@ async def run_named(client: httpx.AsyncClient, keys: list[str], live: bool):
             await process(client, key, repo)
 
 
+def open_session(args: list[str]):
+    live = args[:1] == ["go-live"]
+    keys = args[1 if live else 0:]
+    if len(keys) != 1:
+        sys.exit("open needs one ticket key: python cadgentic.py open ABC-123")
+    key = keys[0].upper()
+    what = "go-live session" if live else "session"
+    entry = load_state().get(key, {})
+    if live:
+        entry = entry.get("go_live", {})
+    if not (session_id := entry.get("session_id")):
+        sys.exit(f"There's no {what} on record for {key}.")
+    # An interrupted run stays "running" in the state file, so look for a live process instead.
+    if subprocess.run(["pgrep", "-f", session_id], capture_output=True).returncode == 0:
+        sys.exit(f"The {what} for {key} is in use, by a run that's still going or in another terminal.")
+    os.chdir(entry["repo"])
+    os.execvp("claude", ["claude", "--resume", session_id])
+
+
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     for noisy in ("httpx", "claude_agent_sdk"):
@@ -812,7 +834,10 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    if sys.argv[1:2] == ["open"]:
+        open_session(sys.argv[2:])
+    else:
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            pass

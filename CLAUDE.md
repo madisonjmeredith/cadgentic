@@ -19,13 +19,14 @@ pip install -r requirements.txt
 python cadgentic.py                    # poll until stopped
 python cadgentic.py ABC-123            # run /ticket for one ticket now, then exit
 python cadgentic.py go-live ABC-123    # run /go-live for one ticket now, then exit
+python cadgentic.py open ABC-123       # open a run's session in Claude Code (open go-live ABC-123 for the go-live one)
 ```
 
 There is no test suite, linter, or build step. `.venv/bin/python -m py_compile cadgentic.py` checks syntax without running anything. Importing the module does run it: config is read at import time, and the script exits if `.env` settings or `repos.json` are missing.
 
 ## Never try a change against real Jira
 
-All three commands above have real effects. A run moves the ticket in Jira, pushes branches to a client repo, deploys a review theme, and posts on client-visible tickets. A go-live run can deploy to production. Don't run any of them to check a change. Build a throwaway harness in the scratchpad instead:
+The first three commands above have real effects. A run moves the ticket in Jira, pushes branches to a client repo, deploys a review theme, and posts on client-visible tickets. A go-live run can deploy to production. `open` starts no run, but it launches an interactive `claude` on a real client session. Don't run any of them to check a change. Build a throwaway harness in the scratchpad instead:
 
 - **A copy of the script.** Everything it reads and writes (`.env`, `repos.json`, `processed_tickets.json`, `logs/`, `plans/`, `decisions/`) is resolved next to the script, so copy `cadgentic.py` into a scratch directory with its own `repos.json`.
 - **A fake Jira.** Shell variables win over `.env`, so set `JIRA_BASE_URL` to a local `http.server` along with a dummy `JIRA_EMAIL` and `JIRA_API_TOKEN`. It needs `/rest/api/3/search/jql`, plus `/rest/api/3/myself` and `/rest/api/3/issue/<KEY>/comment` when polling with `GO_LIVE` on, which is the default.
@@ -33,6 +34,7 @@ All three commands above have real effects. A run moves the ticket in Jira, push
 - **The same tool limits.** A scratch copy has no `.env`, so set `EXTRA_DISALLOWED_TOOLS` in the shell to the value in the real one. Without it a test run can reach MCP servers that real runs are kept away from.
 - **A fake `gh`** first on `PATH`, to capture the pull request comment.
 - **A cheap model**, e.g., `ANTHROPIC_MODEL=haiku`.
+- **For `open` only, a fake `claude`** first on `PATH` and a made-up `processed_tickets.json` next to the scratch copy. Leave the fake off `PATH` for run tests, which find the CLI with `shutil.which("claude")`.
 
 A go-live test must show the stand-in's question being refused. If it comes back answered, go-live runs are auto-answering questions, which must never happen.
 
@@ -48,6 +50,8 @@ Test plans land in `~/.claude/plans/` under random names. Delete only the ones t
 - **Go-live lane:** `go_live()` runs `GO_LIVE_PROMPT` with `live=True` and reads the outcome from the last `go-live <KEY>: <outcome>` line of the agent's final message.
 
 `poll()` works go-live tickets first, then new tickets, one session at a time. Each ticket's random delay and its whole run are awaited inside the poll, so one poll can last hours, and `POLL_INTERVAL` counts from when it ends. `run_named()` (a key on the command line) skips the search, the delay, the status check, and the restart cleanup.
+
+`open_session()` (the `open` command) is handled in the `__main__` block before `main()`, so it never touches Jira. It reads the repo and session ID from the ticket's state entry, or from its `go_live` object for `open go-live`, and execs `claude --resume` in that repo. It refuses when `pgrep -f` finds a process with the session ID in its arguments. It doesn't go by `status`, which stays `running` after an interrupted run until the next polling start.
 
 ### Who decides what a run may do
 

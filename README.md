@@ -60,6 +60,19 @@ The same works for a deploy:
 python cadgentic.py go-live ABC-123
 ```
 
+To look back at a run, open its session:
+
+```sh
+python cadgentic.py open ABC-123
+python cadgentic.py open go-live ABC-123
+```
+
+The first opens the session from the ticket's latest `/ticket` run. The second opens the one from its latest `/go-live` run. Claude Code starts in the repo the run used with that session resumed. You can read back through the run, ask it about what it did, or carry on from where it stopped.
+
+It won't open a session that's in use, whether by a run that's still going or in another terminal. Two processes on one session interleave their messages into one transcript. It checks for a process that has the session and ignores the status in `processed_tickets.json`. An interrupted run can be opened while its status still says `running`.
+
+Every run ends by printing the `claude --resume` command for its session, which is the command `open` runs. A run's session doesn't show up in Claude Code's resume picker since the picker leaves out sessions started through the Agent SDK. Its ID is the way back to it.
+
 ## How it works
 
 Every `POLL_INTERVAL` seconds the script searches Jira for tickets assigned to you in one of the `TRIGGER_STATUSES`, across every project. Statuses are worked in the order they're listed. Within a status the oldest ticket goes first.
@@ -133,7 +146,7 @@ Set `GO_LIVE=false` to leave approved tickets alone.
 
 Everything the script writes sits next to it and is listed in `.gitignore`:
 
-- `processed_tickets.json` has one entry per ticket with its status, repo, session ID, and either the agent's last words or the reason the run failed.
+- `processed_tickets.json` has one entry per ticket with its status, repo, session ID, and either the agent's last words or the reason the run failed. `open` reads the repo and session ID from it.
 - `logs/<KEY>.log` has what the agent said and every tool it called.
 - `plans/<KEY>.md` has the plan as it was presented.
 - `decisions/<KEY>.md` has the questions the run asked and how they were answered.
