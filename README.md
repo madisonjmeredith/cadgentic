@@ -1,6 +1,6 @@
 # Cadgentic
 
-Cadgentic polls Jira for tickets assigned to you and hands each one to Claude Code's `/ticket` command in the repo its Jira project maps to. A run plans the ticket, builds it, deploys it for review, checks it, and posts the handoff comment with nobody at the keyboard. Once a ticket is approved, Cadgentic hands it to `/go-live`.
+Cadgentic polls Jira for tickets assigned to you and hands each one to Claude Code's `/ticket` command in the repo its Jira project maps to. A run plans the ticket, builds it, deploys it for review, checks it, and posts the handoff comment with nobody at the keyboard. A ticket that's sent back for more work gets another run. Once a ticket is approved, Cadgentic hands it to `/go-live`.
 
 ## Requirements
 
@@ -114,6 +114,16 @@ Three limits apply to every run:
 
 The Jira API token is also blanked in the session's environment so the agent's shell can't read it.
 
+### When a ticket is sent back
+
+A ticket that was handed off comes back when a reviewer assigns it to you again and moves it to one of the `TRIGGER_STATUSES`. The search finds it there and it gets another run, with the same wait and the same checks as a new ticket.
+
+The run is a new session with the same `/ticket <key>` prompt. `/ticket` finds the work that's already in the repo and plans only what the ticket's latest comment asks for. If that comment is your own, there's no feedback to act on. The run stops there and is recorded as `finished`.
+
+Only a ticket whose last run ended `handed_off` gets another run. That status means the ticket had moved on to another status or another person. Finding it in the search again means someone sent it back. A ticket whose last run ended any other way is skipped (see [Known issues](#known-issues)).
+
+`processed_tickets.json` and `open` keep the latest round's session. A round that presents a plan or asks questions overwrites `plans/<KEY>.md` or `decisions/<KEY>.md`. Its questions go on the pull request as their own comment. `logs/<KEY>.log` keeps every round, each under a line with its session ID.
+
 ### Going live
 
 Each poll also looks for tickets that are approved to go live and hands them to `/go-live`, ahead of any new tickets. A ticket counts when it is or was assigned to you and one of these is true:
@@ -159,13 +169,14 @@ Everything the script writes sits next to it and is listed in `.gitignore`:
 | `planned` | The plan is waiting for approval (`AUTO_APPROVE_PLAN=false`). |
 | `failed` | The run errored, timed out, or was interrupted. |
 
-A poll hands a ticket to `/ticket` only once. It skips any ticket that has one of these statuses, whichever one it is. To run a ticket again, pass its key on the command line.
+A poll skips any ticket that has one of these statuses except `handed_off`. A `handed_off` ticket gets another run once it's [sent back](#when-a-ticket-is-sent-back). To run any other ticket again, pass its key on the command line.
 
 The `go_live` entry is tracked on its own. A ticket with a status is still picked up for `/go-live` once it's approved. A ticket with only a `go_live` entry is still picked up for `/ticket`.
 
 ## Known issues
 
 - A project with more than one repo only routes a ticket that already has a branch or commits in one of them. A new ticket in one of those projects is skipped until its work is started by hand.
-- A ticket that comes back with feedback isn't picked up again since it already has a status in `processed_tickets.json`.
+- A ticket that's sent back is only picked up when its last run handed it off. If that run stopped early or failed and you finished the ticket by hand, it's skipped when it comes back. Pass its key to run it.
+- A poll doesn't hand a ticket to `/go-live` a second time once it has gone live, even after a later round is approved. Pass its key with `go-live`.
 - A failed run isn't retried even when the cause was temporary. Its ticket stays In Progress until you run it again or move it yourself.
 - The notification is macOS only.

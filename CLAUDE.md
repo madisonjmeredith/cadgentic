@@ -29,7 +29,7 @@ There is no test suite, linter, or build step. `.venv/bin/python -m py_compile c
 The first three commands above have real effects. A run moves the ticket in Jira, pushes branches to a client repo, deploys a review theme, and posts on client-visible tickets. A go-live run can deploy to production. `open` starts no run, but it launches an interactive `claude` on a real client session. Don't run any of them to check a change. Build a throwaway harness in the scratchpad instead:
 
 - **A copy of the script.** Everything it reads and writes (`.env`, `repos.json`, `processed_tickets.json`, `logs/`, `plans/`, `decisions/`) is resolved next to the script, so copy `cadgentic.py` into a scratch directory with its own `repos.json`.
-- **A fake Jira.** Shell variables win over `.env`, so set `JIRA_BASE_URL` to a local `http.server` along with a dummy `JIRA_EMAIL` and `JIRA_API_TOKEN`. It needs `/rest/api/3/search/jql`, plus `/rest/api/3/myself` and `/rest/api/3/issue/<KEY>/comment` when polling with `GO_LIVE` on, which is the default.
+- **A fake Jira.** Shell variables win over `.env`, so set `JIRA_BASE_URL` to a local `http.server` along with a dummy `JIRA_EMAIL` and `JIRA_API_TOKEN`. It needs `/rest/api/3/search/jql`, plus `/rest/api/3/myself` and `/rest/api/3/issue/<KEY>/comment` when polling with `GO_LIVE` on, which is the default. The stand-in skill can't write to it, so the fake plays the handoff itself: add `/rest/api/3/issue/<KEY>/transitions`, and on a POST there take the ticket out of the trigger search. Put it back to test a ticket that's sent back.
 - **A stand-in skill.** Use a throwaway git repo with a project skill that asks one `AskUserQuestion`, enters plan mode, and presents a plan. Swap it in with `AGENT_PROMPT="/demo {key}"` or `GO_LIVE_PROMPT="/demogl {key}"`. Never point a test at the real `/ticket` or `/go-live`.
 - **The same tool limits.** A scratch copy has no `.env`, so set `EXTRA_DISALLOWED_TOOLS` in the shell to the value in the real one. Without it a test run can reach MCP servers that real runs are kept away from.
 - **A fake `gh`** first on `PATH`, to capture the pull request comment.
@@ -49,7 +49,7 @@ Test plans land in `~/.claude/plans/` under random names. Delete only the ones t
 - **Ticket lane:** `process()` moves the ticket to In Progress over REST, runs `AGENT_PROMPT`, then asks Jira where the ticket ended up (`handoff_status()`). The agent doesn't report its own outcome. Still assigned and still in progress means it stopped early (`finished`). Anything else is `handed_off`.
 - **Go-live lane:** `go_live()` runs `GO_LIVE_PROMPT` with `live=True` and reads the outcome from the last `go-live <KEY>: <outcome>` line of the agent's final message.
 
-`poll()` works go-live tickets first, then new tickets, one session at a time. Each ticket's random delay and its whole run are awaited inside the poll, so one poll can last hours, and `POLL_INTERVAL` counts from when it ends. `run_named()` (a key on the command line) skips the search, the delay, the status check, and the restart cleanup.
+`poll()` works go-live tickets first, then new and sent-back tickets, one session at a time. Each ticket's random delay and its whole run are awaited inside the poll, so one poll can last hours, and `POLL_INTERVAL` counts from when it ends. `run_named()` (a key on the command line) skips the search, the delay, the status check, and the restart cleanup.
 
 `open_session()` (the `open` command) is handled in the `__main__` block before `main()`, so it never touches Jira. It reads the repo and session ID from the ticket's state entry, or from its `go_live` object for `open go-live`, and execs `claude --resume` in that repo. It refuses when `pgrep -f` finds a process with the session ID in its arguments. It doesn't go by `status`, which stays `running` after an interrupted run until the next polling start.
 
@@ -73,7 +73,8 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 | In `cadgentic.py` | On the skill side |
 |---|---|
 | `UNATTENDED`, `GO_LIVE_UNATTENDED` (appended to the system prompt) | A skill treats a run as unattended only when the system prompt says Cadgentic started it. |
-| `RECORD_HEADING` | `ticket` posts the answered questions on the pull request under this exact heading. `record_on_pull_request()` posts `decisions/<KEY>.md` when it's missing. |
+| `RECORD_HEADING` | `ticket` posts the answered questions on the pull request under this exact heading. `record_on_pull_request()` posts `decisions/<KEY>.md` when no comment posted since the run started has it. |
+| `poll()` re-running a `handed_off` ticket with the same `AGENT_PROMPT` | `ticket` switches to its follow-up flow when the ticket's branch or `[<KEY>]` commits exist. In an unattended run it stops when the latest comment is Madison's own. |
 | `OUTCOME` | `go-live` ends its report with `go-live <KEY>: <outcome>`. No match is recorded as `unknown`. |
 | `default_option()` | Options are marked "(Recommended)" in their label. |
 | `has_work()`, `record_on_pull_request()` | Branches are `feature/<KEY>` and commit subjects carry `[<KEY>]`. |
@@ -82,7 +83,7 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 
 `processed_tickets.json` has one entry per ticket. Its top-level fields belong to the ticket lane and its `go_live` object to the go-live lane. `record()` merges one level deep, so `go_live()` writes the whole `go_live` object each time.
 
-The lanes re-run on different rules. A poll skips any ticket whose entry has a top-level `status`, whatever it is. A go-live is repeated when the last outcome is in `RECHECKED` and the ticket's Jira `updated` stamp differs from the saved `seen` (`go_live_due()`).
+The lanes re-run on different rules. A poll works a ticket again only when its top-level `status` is `handed_off` and the search finds it. `handoff_status()` records `handed_off` only when the ticket no longer matched the search, so a later match means someone sent it back. Any other status is skipped. Don't widen this to `finished` or `failed` without another guard: a ticket that couldn't be moved to In Progress never leaves the search and would be re-run on every poll. A go-live is repeated when the last outcome is in `RECHECKED` and the ticket's Jira `updated` stamp differs from the saved `seen` (`go_live_due()`).
 
 ### Claude in Chrome
 

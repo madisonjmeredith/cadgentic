@@ -27,7 +27,7 @@ import sys
 import textwrap
 import uuid
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
@@ -424,7 +424,7 @@ def write_decisions(key: str, decisions: list[dict]) -> Path:
     return path
 
 
-def record_on_pull_request(key: str, repo: Path, body: Path) -> str | None:
+def record_on_pull_request(key: str, repo: Path, body: Path, since: datetime) -> str | None:
     def gh(*args: str) -> str:
         return subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True, check=True).stdout
 
@@ -436,11 +436,15 @@ def record_on_pull_request(key: str, repo: Path, body: Path) -> str | None:
             return None
         number = str(pulls[0]["number"])
         comments = json.loads(gh("pr", "view", number, "--json", "comments"))["comments"]
-        if any(RECORD_HEADING in comment["body"] for comment in comments):
+        if any(
+            RECORD_HEADING in comment["body"]
+            and datetime.fromisoformat(comment["createdAt"].replace("Z", "+00:00")) >= since
+            for comment in comments
+        ):
             return "the run posted them on the pull request"
         gh("pr", "comment", number, "--body-file", str(body))
         return "the run didn't post them, so the plain record went on the pull request"
-    except (OSError, KeyError, subprocess.CalledProcessError, json.JSONDecodeError):
+    except (OSError, KeyError, ValueError, subprocess.CalledProcessError):
         return None
 
 
@@ -603,6 +607,7 @@ async def handoff_status(client: httpx.AsyncClient, key: str) -> str:
 async def process(client: httpx.AsyncClient, key: str, repo: Path):
     session_id = str(uuid.uuid4())
     decisions: list[dict] = []
+    started = datetime.now(timezone.utc)
     record(key, status="running", repo=str(repo), session_id=session_id, started_at=now())
     await start_progress(client, key)
 
@@ -618,7 +623,8 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path):
 
     if decisions:
         answers = write_decisions(key, decisions)
-        log.info("    %d question(s) answered: %s", len(decisions), record_on_pull_request(key, repo, answers) or answers)
+        posted = record_on_pull_request(key, repo, answers, started)
+        log.info("    %d question(s) answered: %s", len(decisions), posted or answers)
 
     resume = f"cd {repo} && claude --resume {session_id}"
     if status == "handed_off":
@@ -694,10 +700,11 @@ async def poll(client: httpx.AsyncClient):
         for ticket in (await approved_tickets(client, state) if GO_LIVE else [])
         if (repo := route(ticket["key"]))
     ]
+    # A handed-off ticket had left the queue, so it's only found here once someone sends it back.
     ready = [
         (ticket, repo)
         for ticket in sorted(await fetch_tickets(client), key=status_rank)
-        if not state.get(ticket["key"], {}).get("status") and (repo := route(ticket["key"]))
+        if state.get(ticket["key"], {}).get("status") in (None, "handed_off") and (repo := route(ticket["key"]))
     ]
     if not approved and not ready:
         log.info("No new tickets")
@@ -713,11 +720,15 @@ async def poll(client: httpx.AsyncClient):
             continue
         await go_live(key, repo, ticket["fields"].get("updated"))
 
-    if ready:
-        log.info("Found %d new ticket(s)", len(ready))
+    sent_back = {ticket["key"] for ticket, _ in ready if state.get(ticket["key"], {}).get("status")}
+    if fresh := len(ready) - len(sent_back):
+        log.info("Found %d new ticket(s)", fresh)
+    if sent_back:
+        log.info("Found %d ticket(s) sent back for more work", len(sent_back))
     for ticket, repo in ready:
         key = ticket["key"]
-        await wait_turn(key, ticket.get("fields", {}).get("summary", ""), repo)
+        summary = ticket.get("fields", {}).get("summary", "")
+        await wait_turn(key, f"sent back, {summary}" if key in sent_back else summary, repo)
 
         if not await fetch_tickets(client, key):
             log.info("    %s is no longer waiting on you, skipping", key)
