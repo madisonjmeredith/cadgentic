@@ -60,6 +60,15 @@ The same works for a deploy:
 python cadgentic.py go-live ABC-123
 ```
 
+To send a run that stopped early back into its own session, resume it:
+
+```sh
+python cadgentic.py resume ABC-123
+python cadgentic.py resume ABC-123 the deploy check is fixed now
+```
+
+That starts another unattended run in the same session. The agent keeps its plan, the answers it was given, and everything it had read. Anything after the key is passed along as a note about what changed. See [When a run stops early](#when-a-run-stops-early).
+
 To look back at a run, open its session:
 
 ```sh
@@ -124,6 +133,24 @@ Only a ticket whose last run ended `handed_off` gets another run. That status me
 
 `processed_tickets.json` and `open` keep the latest round's session. A round that presents a plan or asks questions overwrites `plans/<KEY>.md` or `decisions/<KEY>.md`. Its questions go on the pull request as their own comment. `logs/<KEY>.log` keeps every round, each under a line with its session ID.
 
+### When a run stops early
+
+A run that ends `finished` or `failed` stopped short of the handoff. A poll won't come back to it. Once you've dealt with whatever stopped it, there are three ways to pick it up:
+
+1. `python cadgentic.py resume ABC-123` carries on unattended in the session the run used.
+2. `python cadgentic.py open ABC-123` opens that session so you can carry on by hand.
+3. `python cadgentic.py ABC-123` starts over in a new session.
+
+A resumed run isn't handed `/ticket <key>` again. Its prompt is `RESUME_PROMPT`, which tells the agent to check whether the thing that stopped it is still in the way and then carry on. The note from the command line is added after it. Everything else matches a first run: the system prompt says the run is unattended, the same limits apply, and the ticket is looked up when the session ends to see whether it was handed off.
+
+`resume` refuses in three cases:
+
+- The ticket's last run ended some other way than `finished` or `failed`.
+- The session is in use, by a run that's still going or in another terminal.
+- The repo has uncommitted changes to tracked files. A run that failed partway through an edit leaves some behind. Commit or stash them first, or use `open`.
+
+Questions answered before the run stopped stay in `decisions/<KEY>.md`. Any asked after the resume are added to the same file. If those answers aren't on the pull request when the resumed run ends, the script posts the saved record. `logs/<KEY>.log` puts the second leg under its own line with the same session ID, marked `resumed`.
+
 ### Going live
 
 Each poll also looks for tickets that are approved to go live and hands them to `/go-live`, ahead of any new tickets. A ticket counts when it is or was assigned to you and one of these is true:
@@ -169,7 +196,7 @@ Everything the script writes sits next to it and is listed in `.gitignore`:
 | `planned` | The plan is waiting for approval (`AUTO_APPROVE_PLAN=false`). |
 | `failed` | The run errored, timed out, or was interrupted. |
 
-A poll skips any ticket that has one of these statuses except `handed_off`. A `handed_off` ticket gets another run once it's [sent back](#when-a-ticket-is-sent-back). To run any other ticket again, pass its key on the command line.
+A poll skips any ticket that has one of these statuses except `handed_off`. A `handed_off` ticket gets another run once it's [sent back](#when-a-ticket-is-sent-back). To run any other ticket again, pass its key on the command line. A `finished` or `failed` one can be [resumed](#when-a-run-stops-early) instead.
 
 The `go_live` entry is tracked on its own. A ticket with a status is still picked up for `/go-live` once it's approved. A ticket with only a `go_live` entry is still picked up for `/ticket`.
 
@@ -178,5 +205,5 @@ The `go_live` entry is tracked on its own. A ticket with a status is still picke
 - A project with more than one repo only routes a ticket that already has a branch or commits in one of them. A new ticket in one of those projects is skipped until its work is started by hand.
 - A ticket that's sent back is only picked up when its last run handed it off. If that run stopped early or failed and you finished the ticket by hand, it's skipped when it comes back. Pass its key to run it.
 - A poll doesn't hand a ticket to `/go-live` a second time once it has gone live, even after a later round is approved. Pass its key with `go-live`.
-- A failed run isn't retried even when the cause was temporary. Its ticket stays In Progress until you run it again or move it yourself.
+- A failed run isn't retried even when the cause was temporary. Its ticket stays In Progress until you resume it, run it again, or move it yourself.
 - The notification is macOS only.

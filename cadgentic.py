@@ -12,6 +12,7 @@ Run:
   python cadgentic.py              (poll for tickets until stopped)
   python cadgentic.py ABC-123      (run one ticket now, then exit)
   python cadgentic.py go-live ABC-123   (run /go-live for one ticket now, then exit)
+  python cadgentic.py resume ABC-123    (carry on a run that stopped early, in its own session)
   python cadgentic.py open ABC-123      (open a run's session in Claude Code)
 """
 
@@ -76,6 +77,12 @@ DELAY_MAX = int(setting("DELAY_MAX", "2700"))
 AGENT_PROMPT = setting("AGENT_PROMPT", "/ticket {key}")
 GO_LIVE = setting("GO_LIVE", "true").lower() in ("1", "true", "yes")
 GO_LIVE_PROMPT = setting("GO_LIVE_PROMPT", "/go-live {key}")
+RESUME_PROMPT = setting(
+    "RESUME_PROMPT",
+    "Cadgentic is resuming this session to carry on with {key}, and the run is still unattended. "
+    "What stopped it last time may have been dealt with, so check that first. Then pick up where "
+    "you stopped and see the ticket through. If the same thing still stops you, say so and end the run.",
+)
 APPROVED_STATUS = setting("APPROVED_STATUS", "Approved")
 REVIEW_STATUSES = [s.strip() for s in setting("REVIEW_STATUSES", "Testing,Client Testing").split(",") if s.strip()]
 AUTO_APPROVE_PLAN = setting("AUTO_APPROVE_PLAN", "true").lower() in ("1", "true", "yes")
@@ -142,6 +149,9 @@ PLAN_HELD_REPLY = (
 )
 # /ticket posts the questions a run asked under this heading, and the script checks for it.
 RECORD_HEADING = "## Questions answered during planning"
+RECORD_FOOTER = "\n\n🤖 Answered by [Claude Code](https://claude.com/claude-code)\nMessage-Voice: neutral\n"
+RESUME_NOTE = "\n\nWhat has changed since then: {note}"
+RESUMABLE = ("finished", "failed")
 NOBODY_HERE = (
     "This is an unattended run, so nobody is here to approve this. "
     "Carry on without it if you can. Otherwise stop and say what you need."
@@ -411,16 +421,20 @@ def describe(option: dict) -> str:
     return f"{label}. {option.get('description', '')}".strip()
 
 
-def write_decisions(key: str, decisions: list[dict]) -> Path:
-    lines = [RECORD_HEADING]
-    for number, decision in enumerate(decisions, 1):
+def write_decisions(key: str, decisions: list[dict], since: datetime) -> Path | None:
+    path = DECISION_DIR / f"{key}.md"
+    # An older session's record is still here when this one asked nothing, so go by when it was written.
+    earlier = path.read_text() if path.exists() and path.stat().st_mtime >= since.timestamp() else ""
+    if not decisions:
+        return path if earlier else None
+    lines = [earlier.removesuffix(RECORD_FOOTER) if earlier else RECORD_HEADING]
+    first = len(re.findall(r"^\d+\. ", lines[0], re.M)) + 1
+    for number, decision in enumerate(decisions, first):
         lines += ["", f"{number}. {decision['question']}", "", f"   Answered: {describe(decision['answer'])}"]
         if decision["alternatives"]:
             lines += ["", "   Alternatives:", ""]
             lines += [f"   - {describe(option)}" for option in decision["alternatives"]]
-    lines += ["", "🤖 Answered by [Claude Code](https://claude.com/claude-code)", "Message-Voice: neutral", ""]
-    path = DECISION_DIR / f"{key}.md"
-    path.write_text("\n".join(lines))
+    path.write_text("\n".join(lines) + RECORD_FOOTER)
     return path
 
 
@@ -487,7 +501,7 @@ def jira_gate(key: str):
 
 
 async def run_ticket(
-    key: str, repo: Path, session_id: str, decisions: list[dict], live: bool = False
+    key: str, repo: Path, session_id: str, decisions: list[dict], live: bool = False, resume_prompt: str = ""
 ) -> tuple[bool, str]:
     planned = False
     result = None
@@ -547,7 +561,8 @@ async def run_ticket(
             cwd=repo,
             # The SDK's bundled CLI would re-point Claude in Chrome at itself, so prefer the installed one.
             cli_path=shutil.which("claude"),
-            session_id=session_id,
+            session_id=None if resume_prompt else session_id,
+            resume=session_id if resume_prompt else None,
             permission_mode="auto",
             system_prompt={"type": "preset", "preset": "claude_code", "append": briefing},
             can_use_tool=can_use_tool,
@@ -566,8 +581,10 @@ async def run_ticket(
             stderr=write,
         )
 
-        write(f"--- {now()} session {session_id} in {repo}")
-        prompt = (GO_LIVE_PROMPT if live else AGENT_PROMPT).format(key=key)
+        write(f"--- {now()} session {session_id} {'resumed ' if resume_prompt else ''}in {repo}")
+        if resume_prompt:
+            write(f"[resumed] {' '.join(resume_prompt.split())}")
+        prompt = resume_prompt or (GO_LIVE_PROMPT if live else AGENT_PROMPT).format(key=key)
         with anyio.fail_after(RUN_TIMEOUT):
             async for message in query(prompt=prompt, options=options):
                 if isinstance(message, AssistantMessage):
@@ -604,15 +621,21 @@ async def handoff_status(client: httpx.AsyncClient, key: str) -> str:
         return "finished"
 
 
-async def process(client: httpx.AsyncClient, key: str, repo: Path):
-    session_id = str(uuid.uuid4())
+async def process(client: httpx.AsyncClient, key: str, repo: Path, resumed: dict | None = None, note: str = ""):
+    session_id = resumed["session_id"] if resumed else str(uuid.uuid4())
     decisions: list[dict] = []
-    started = datetime.now(timezone.utc)
-    record(key, status="running", repo=str(repo), session_id=session_id, started_at=now())
+    started = began = datetime.now(timezone.utc)
+    prompt = ""
+    if resumed:
+        began = datetime.fromisoformat(resumed["started_at"]).astimezone()
+        prompt = RESUME_PROMPT.format(key=key) + (RESUME_NOTE.format(note=note) if note else "")
+        record(key, status="running")
+    else:
+        record(key, status="running", repo=str(repo), session_id=session_id, started_at=now())
     await start_progress(client, key)
 
     try:
-        planned, said = await run_ticket(key, repo, session_id, decisions)
+        planned, said = await run_ticket(key, repo, session_id, decisions, resume_prompt=prompt)
         detail = " ".join(said.split())[:300]
         status = "planned" if planned and not AUTO_APPROVE_PLAN else await handoff_status(client, key)
     except TimeoutError:
@@ -621,12 +644,14 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path):
         status, detail = "failed", str(e)
     record(key, status=status, detail=detail, finished_at=now())
 
-    if decisions:
-        answers = write_decisions(key, decisions)
-        posted = record_on_pull_request(key, repo, answers, started)
-        log.info("    %d question(s) answered: %s", len(decisions), posted or answers)
+    if answers := write_decisions(key, decisions, began):
+        # With nothing new asked, a comment from any point in the session covers the earlier answers.
+        posted = record_on_pull_request(key, repo, answers, started if decisions else began)
+        asked = f"{len(decisions)} question(s) answered" if decisions else "Answers from before the resume"
+        log.info("    %s: %s", asked, posted or answers)
 
     resume = f"cd {repo} && claude --resume {session_id}"
+    carry_on = f"python cadgentic.py resume {key}"
     if status == "handed_off":
         log.info("  ✓ %s handed off for review", key)
         log.info("    To review the session: %s", resume)
@@ -638,10 +663,12 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path):
     elif status == "finished":
         log.warning("  ■ %s stopped before the handoff. Its report is the last message above.", key)
         log.warning("    To pick it up: %s", resume)
+        log.warning("    To send it back in unattended: %s", carry_on)
         notify(f"{key} stopped before the handoff")
     else:
         log.error("  ✗ %s failed: %s", key, detail)
         log.error("    To pick it up: %s", resume)
+        log.error("    To send it back in unattended: %s", carry_on)
         notify(f"{key} needs attention")
 
 
@@ -757,6 +784,29 @@ async def run_named(client: httpx.AsyncClient, keys: list[str], live: bool):
             await process(client, key, repo)
 
 
+def session_in_use(session_id: str) -> bool:
+    # An interrupted run stays "running" in the state file, so look for a live process instead.
+    return subprocess.run(["pgrep", "-f", session_id], capture_output=True).returncode == 0
+
+
+async def resume_session(client: httpx.AsyncClient, key: str, note: str):
+    entry = load_state().get(key, {})
+    session_id, repo = entry.get("session_id"), Path(entry.get("repo", ""))
+    if not session_id:
+        problem = "there's no session on record for it"
+    elif entry.get("status") not in RESUMABLE:
+        problem = f"its last run is recorded as {entry.get('status')}, and only one that stopped early or failed is resumed"
+    elif session_in_use(session_id):
+        problem = "its session is in use, by a run that's still going or in another terminal"
+    elif uncommitted_changes(repo):
+        problem = f"{repo} has uncommitted changes"
+    else:
+        log.info("  → %s, back in session %s (%s)", key, session_id, str(repo).replace(str(Path.home()), "~"))
+        await process(client, key, repo, entry, note)
+        return
+    log.error("  ✗ %s not resumed: %s", key, problem)
+
+
 def open_session(args: list[str]):
     live = args[:1] == ["go-live"]
     keys = args[1 if live else 0:]
@@ -769,8 +819,7 @@ def open_session(args: list[str]):
         entry = entry.get("go_live", {})
     if not (session_id := entry.get("session_id")):
         sys.exit(f"There's no {what} on record for {key}.")
-    # An interrupted run stays "running" in the state file, so look for a live process instead.
-    if subprocess.run(["pgrep", "-f", session_id], capture_output=True).returncode == 0:
+    if session_in_use(session_id):
         sys.exit(f"The {what} for {key} is in use, by a run that's still going or in another terminal.")
     os.chdir(entry["repo"])
     os.execvp("claude", ["claude", "--resume", session_id])
@@ -785,14 +834,19 @@ async def main():
         folder.mkdir(exist_ok=True)
 
     global me
-    live = sys.argv[1:2] == ["go-live"]
-    named = [arg.upper() for arg in sys.argv[2 if live else 1:]]
-    if live and not named:
-        sys.exit("go-live needs a ticket key: python cadgentic.py go-live ABC-123")
+    command = sys.argv[1] if sys.argv[1:2] in (["go-live"], ["resume"]) else ""
+    live, resuming = command == "go-live", command == "resume"
+    args = sys.argv[2 if command else 1:]
+    if command and not args:
+        sys.exit(f"{command} needs a ticket key: python cadgentic.py {command} ABC-123")
+    named = [arg.upper() for arg in (args[:1] if resuming else args)]
+    note = " ".join(args[1:]) if resuming else ""
     log.info("Cadgentic started")
     log.info("  Jira: %s", JIRA_BASE_URL)
     log.info("  Repos: %d Jira projects mapped in %s", len(load_repos()), REPOS_FILE.name)
-    if named:
+    if resuming:
+        log.info("  Resuming %s where its last run stopped", named[0])
+    elif named:
         log.info("  Running %s%s once", "/go-live for " if live else "", ", ".join(named))
     else:
         log.info("  Polling every %ss for %s", POLL_INTERVAL, " or ".join(f"'{s}'" for s in TRIGGER_STATUSES))
@@ -810,6 +864,9 @@ async def main():
         headers={"Accept": "application/json"},
         timeout=30,
     ) as client:
+        if resuming:
+            await resume_session(client, named[0], note)
+            return
         if named:
             await run_named(client, named, live)
             return
