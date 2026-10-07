@@ -64,6 +64,8 @@ Four layers, set up in `run_ticket()`:
 
 With `live=True`, layer 4 refuses `AskUserQuestion` and `ExitPlanMode` before anything else. Nothing is answered or approved for a go-live run.
 
+Auto mode's classifier runs ahead of layer 4 and refuses on its own. A refusal goes back to the agent as the tool result and never reaches `can_use_tool()`, so it leaves no `[denied]` line in the log. It refuses a push to `main` on a live-theme store as a production deploy. `/ticket` makes one such push when it starts a branch: a `[skip ci]` commit holding the theme's latest changes, which deploys nothing. That push gets through only because of the "Theme Sync Push" rule in `autoMode.allow` in `~/.claude/settings.json`. Without the rule, runs on live-theme stores stop at "Start the branch."
+
 Sessions load Madison's real user settings, skills, hooks, and MCP servers (`setting_sources`, `skills="all"`), so a change under `~/.claude` changes what a run does. The agent reaches Jira through the `atlassian` MCP server. The script's own REST calls use the API token, which is blanked in the agent's environment.
 
 ### The contract with the skills
