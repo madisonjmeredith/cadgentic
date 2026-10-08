@@ -34,6 +34,7 @@ The first four commands above have real effects. A run moves the ticket in Jira,
 - **A stand-in skill.** Use a throwaway git repo with a project skill that asks one `AskUserQuestion`, enters plan mode, and presents a plan. Swap it in with `AGENT_PROMPT="/demo {key}"` or `GO_LIVE_PROMPT="/demogl {key}"`. Never point a test at the real `/ticket` or `/go-live`.
 - **The same tool limits.** A scratch copy has no `.env`, so set `EXTRA_DISALLOWED_TOOLS` in the shell to the value in the real one. Without it a test run can reach MCP servers that real runs are kept away from.
 - **A fake `gh`** first on `PATH`, to capture the pull request comment.
+- **A fake `ssh`** first on `PATH` when the stand-in follows a project's own deploy steps. Give the fixture a copy of the project's deploy script with its host changed to one that can't resolve, so a run that misses the fake reaches nothing.
 - **A cheap model**, e.g., `ANTHROPIC_MODEL=haiku`.
 - **For `open` only, a fake `claude`** first on `PATH` and a made-up `processed_tickets.json` next to the scratch copy. Leave the fake off `PATH` for run tests, which find the CLI with `shutil.which("claude")`.
 
@@ -73,7 +74,7 @@ Four layers, set up in `run_ticket()`:
 
 With `live=True`, layer 4 refuses `AskUserQuestion` and `ExitPlanMode` before anything else. Nothing is answered or approved for a go-live run.
 
-Auto mode's classifier runs ahead of layer 4 and refuses on its own. A refusal goes back to the agent as the tool result and never reaches `can_use_tool()`, so it leaves no `[denied]` line in the log. It refuses a push to `main` on a live-theme store as a production deploy. `/ticket` makes one such push when it starts a branch: a `[skip ci]` commit holding the theme's latest changes, which deploys nothing. That push gets through only because of the "Theme Sync Push" rule in `autoMode.allow` in `~/.claude/settings.json`. Without the rule, runs on live-theme stores stop at "Start the branch."
+Auto mode's classifier runs ahead of layer 4 and refuses on its own. A refusal goes back to the agent as the tool result and never reaches `can_use_tool()`, so it leaves no `[denied]` line in the log. It refuses a push to `main` on a live-theme store as a production deploy. `/ticket` makes one such push when it starts a branch: a `[skip ci]` commit holding the theme's latest changes, which deploys nothing. That push gets through only because of the "Theme Sync Push" rule in `autoMode.allow` in `~/.claude/settings.json`. Without the rule, runs on live-theme stores stop at "Start the branch." It doesn't refuse the same things off Shopify. On a fixture shaped like a project that's reviewed from `main`, it let a run merge into `main`, push it, and run a deploy script that works over SSH, so those runs need no rule.
 
 Sessions load Madison's real user settings, skills, hooks, and MCP servers (`setting_sources`, `skills="all"`), so a change under `~/.claude` changes what a run does. The agent reaches Jira through the `atlassian` MCP server. The script's own REST calls use the API token, which is blanked in the agent's environment.
 
@@ -90,8 +91,10 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 | `OUTCOME` | `go-live` ends its report with `go-live <KEY>: <outcome>`. No match is recorded as `unknown`. |
 | `default_option()` | Options are marked "(Recommended)" in their label. |
 | `has_work()`, `record_on_pull_request()` | Branches are `feature/<KEY>` and commit subjects carry `[<KEY>]`. |
-| `process_in_environment()` and a project's `check`, `up`, `down` in `repos.json` | On a Lightning repo, `ticket` expects the Docker stack to be up when an unattended run starts. It leaves the containers alone, and stops the run if the local site doesn't answer. |
+| `process_in_environment()` and a project's `check`, `up`, `down` in `repos.json` | On a Lightning repo, or any other project in a Docker stack, `ticket` expects the stack to be up when an unattended run starts. It leaves the containers alone, and stops the run if the local site doesn't answer. |
 | `GO_LIVE_EXTRA_JQL` | `go-live` covers standard Shopify stores only. The setting keeps other projects' approved tickets out of the go-live search. |
+
+A project that's neither a Shopify theme nor a Lightning build has no flow of its own in `ticket`. It deploys by the "Deploying for review" section in the project's `CLAUDE.md` (the skill's project flow), and the script has no part in it. That section can make `main` the review branch and name a command that deploys over SSH. A run on such a project merges into `main`, pushes it, and reaches a server from the agent's shell, with whatever SSH agent the script was started with. `go-live` doesn't cover these projects either, so keep them in `GO_LIVE_EXTRA_JQL`.
 
 ### State
 

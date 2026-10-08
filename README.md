@@ -9,6 +9,7 @@ Cadgentic polls Jira for tickets assigned to you and hands each one to Claude Co
 - The `/ticket` and `/go-live` skills, the skills they call, and the `atlassian` MCP server they work with tickets through
 - Chrome with the Claude extension, signed in to Jira
 - The GitHub CLI, logged in
+- For a project that deploys over SSH, a key its server accepts without a prompt
 - A [Jira API token](https://id.atlassian.com/manage-profile/security/api-tokens)
 
 Runs go through the Claude Agent SDK. It drives the `claude` on your path, or its own bundled copy when there isn't one. Either way it uses your existing login and loads the same settings, skills, hooks, and MCP servers as an interactive session. Chrome is how `/ticket` downloads a ticket's attachments and how `qa` checks the deployed work.
