@@ -86,6 +86,7 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 | `OUTCOME` | `go-live` ends its report with `go-live <KEY>: <outcome>`. No match is recorded as `unknown`. |
 | `default_option()` | Options are marked "(Recommended)" in their label. |
 | `has_work()`, `record_on_pull_request()` | Branches are `feature/<KEY>` and commit subjects carry `[<KEY>]`. |
+| `GO_LIVE_EXTRA_JQL` | `go-live` covers standard Shopify stores only. The setting keeps other projects' approved tickets out of the go-live search. |
 
 ### State
 

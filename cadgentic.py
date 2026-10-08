@@ -77,6 +77,7 @@ DELAY_MAX = int(setting("DELAY_MAX", "2700"))
 AGENT_PROMPT = setting("AGENT_PROMPT", "/ticket {key}")
 GO_LIVE = setting("GO_LIVE", "true").lower() in ("1", "true", "yes")
 GO_LIVE_PROMPT = setting("GO_LIVE_PROMPT", "/go-live {key}")
+GO_LIVE_EXTRA_JQL = setting("GO_LIVE_EXTRA_JQL", "")
 RESUME_PROMPT = setting(
     "RESUME_PROMPT",
     "Cadgentic is resuming this session to carry on with {key}, and the run is still unattended. "
@@ -278,8 +279,7 @@ def go_live_jql(statuses: list[str], recent: bool = False) -> str:
     clauses = [f"status in ({names})", "(assignee = currentUser() OR assignee was currentUser())"]
     if recent:
         clauses.append("updated >= -14d")
-    if JIRA_EXTRA_JQL:
-        clauses.append(f"({JIRA_EXTRA_JQL})")
+    clauses += [f"({extra})" for extra in (JIRA_EXTRA_JQL, GO_LIVE_EXTRA_JQL) if extra]
     return " AND ".join(clauses) + " ORDER BY updated ASC"
 
 

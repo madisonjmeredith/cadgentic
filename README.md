@@ -177,6 +177,8 @@ Nothing is approved or answered for the skill in these runs, and the ticket isn'
 
 A ticket that came back `ready`, `held`, `not-approved`, or `unknown` is looked at again once it changes in Jira. A poll doesn't come back to any other outcome. To run one of those again, pass its key with `go-live`.
 
+`GO_LIVE_EXTRA_JQL` is ANDed onto the search for approved tickets and nothing else. Use it to keep a project that `/go-live` doesn't cover out of this lane, e.g., `GO_LIVE_EXTRA_JQL='project not in (LMN)'`. Without it an approved ticket in that project is handed to `/go-live`, which can only stop, and the ticket is looked at again each time it changes in Jira. Passing a key with `go-live` still runs it.
+
 Set `GO_LIVE=false` to leave approved tickets alone.
 
 ## State and logs
