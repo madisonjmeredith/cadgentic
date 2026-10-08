@@ -37,6 +37,8 @@ The first four commands above have real effects. A run moves the ticket in Jira,
 - **A cheap model**, e.g., `ANTHROPIC_MODEL=haiku`.
 - **For `open` only, a fake `claude`** first on `PATH` and a made-up `processed_tickets.json` next to the scratch copy. Leave the fake off `PATH` for run tests, which find the CLI with `shutil.which("claude")`.
 
+To test a project's environment commands, give the scratch `repos.json` an object entry whose `check`, `up`, and `down` only touch marker files (`test -f ../env.up`, `touch ../env.up`, `rm -f ../env.up`, each appending its name to a log). Stub `run_ticket`, `start_progress`, `handoff_status`, and `notify`, then call `process_in_environment()`. Cover: down at the start, already up, `up` failing, `check` never passing (set `ENV_TIMEOUT` low), and a session that raises or is cancelled. Never point a test at a real project's commands.
+
 To test `resume`, have the stand-in check a condition after its plan (a file that must exist) and stop when it fails, so the first run ends `finished`. Make the condition true and resume. The run should finish the stand-in's remaining steps with what it chose before it stopped, under the same session ID. To check which answers reach the pull request without an agent, replace `run_ticket` with a stub and call `process()` on a seeded state entry.
 
 A go-live test must show the stand-in's question being refused. If it comes back answered, go-live runs are auto-answering questions, which must never happen.
@@ -51,6 +53,8 @@ Test plans land in `~/.claude/plans/` under random names. Delete only the ones t
 
 - **Ticket lane:** `process()` moves the ticket to In Progress over REST, runs `AGENT_PROMPT`, then asks Jira where the ticket ended up (`handoff_status()`). The agent doesn't report its own outcome. Still assigned and still in progress means it stopped early (`finished`). Anything else is `handed_off`.
 - **Go-live lane:** `go_live()` runs `GO_LIVE_PROMPT` with `live=True` and reads the outcome from the last `go-live <KEY>: <outcome>` line of the agent's final message.
+
+Every ticket-lane entry point (`poll()`, `run_named()`, `resume_session()`) reaches `process()` through `process_in_environment()`. A `repos.json` entry can be an object with `repo` plus `check`, `up`, and `down` shell commands, run from the repo's directory. When there's an `up` and `check` doesn't pass, it runs `up`, waits for `check`, calls `process()`, and runs `down` in a `finally`. An environment that was already up is left running: someone else started it. If it won't come up within `ENV_TIMEOUT`, it runs `down` and returns before `process()` records anything or moves the ticket, so a poll finds the ticket unchanged and tries again. `stranded` keeps that to one notification per ticket. Keep this ahead of the session and out of the skills: MCP servers that run inside the environment only connect when it's up at session start, and a skill can't guarantee the teardown. `go_live()` doesn't start an environment.
 
 `poll()` works go-live tickets first, then new and sent-back tickets, one session at a time. Each ticket's random delay and its whole run are awaited inside the poll, so one poll can last hours, and `POLL_INTERVAL` counts from when it ends. `run_named()` (a key on the command line) skips the search, the delay, the status check, and the restart cleanup.
 
@@ -75,7 +79,7 @@ Sessions load Madison's real user settings, skills, hooks, and MCP servers (`set
 
 ### The contract with the skills
 
-The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`, `ready-for-review`, `qa`, `go-live`). These strings and conventions are shared, so change both sides together:
+The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`, `ready-for-review`, `qa`, `go-live`), with `qa`'s checker in `~/.claude/agents/qa-checker.md`. These strings and conventions are shared, so change both sides together:
 
 | In `cadgentic.py` | On the skill side |
 |---|---|
@@ -86,6 +90,7 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 | `OUTCOME` | `go-live` ends its report with `go-live <KEY>: <outcome>`. No match is recorded as `unknown`. |
 | `default_option()` | Options are marked "(Recommended)" in their label. |
 | `has_work()`, `record_on_pull_request()` | Branches are `feature/<KEY>` and commit subjects carry `[<KEY>]`. |
+| `process_in_environment()` and a project's `check`, `up`, `down` in `repos.json` | On a Lightning repo, `ticket` expects the Docker stack to be up when an unattended run starts. It leaves the containers alone, and stops the run if the local site doesn't answer. |
 | `GO_LIVE_EXTRA_JQL` | `go-live` covers standard Shopify stores only. The setting keeps other projects' approved tickets out of the go-live search. |
 
 ### State

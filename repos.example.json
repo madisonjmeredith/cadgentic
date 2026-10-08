@@ -1,4 +1,10 @@
 {
   "ABC": "~/code/abc-store",
-  "XYZ": ["~/code/xyz-b2c", "~/code/xyz-b2b"]
+  "XYZ": ["~/code/xyz-b2c", "~/code/xyz-b2b"],
+  "LMN": {
+    "repo": "~/code/lmn/src",
+    "check": "curl -skf -o /dev/null https://lmn.test/",
+    "up": "docker compose up -d",
+    "down": "docker compose stop"
+  }
 }

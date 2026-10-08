@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import uuid
 import warnings
@@ -88,6 +89,7 @@ APPROVED_STATUS = setting("APPROVED_STATUS", "Approved")
 REVIEW_STATUSES = [s.strip() for s in setting("REVIEW_STATUSES", "Testing,Client Testing").split(",") if s.strip()]
 AUTO_APPROVE_PLAN = setting("AUTO_APPROVE_PLAN", "true").lower() in ("1", "true", "yes")
 RUN_TIMEOUT = int(setting("RUN_TIMEOUT", "7200"))
+ENV_TIMEOUT = int(setting("ENV_TIMEOUT", "300"))
 MAX_BUDGET_USD = float(setting("MAX_BUDGET_USD", "0")) or None
 EXTRA_DISALLOWED_TOOLS = [s.strip() for s in setting("EXTRA_DISALLOWED_TOOLS", "").split(",") if s.strip()]
 
@@ -184,6 +186,7 @@ RECHECKED = {"ready", "held", "not-approved", "unknown"}
 
 log = logging.getLogger("cadgentic")
 unroutable: set[str] = set()
+stranded: set[str] = set()
 comment_reads: dict[str, tuple[str | None, bool]] = {}
 me = ""
 
@@ -375,10 +378,12 @@ def git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
-def load_repos() -> dict[str, list[Path]]:
+def load_repos() -> dict[str, list[dict]]:
     repos = {}
-    for project, paths in json.loads(REPOS_FILE.read_text()).items():
-        repos[project] = [Path(p).expanduser() for p in ([paths] if isinstance(paths, str) else paths)]
+    for project, entries in json.loads(REPOS_FILE.read_text()).items():
+        entries = entries if isinstance(entries, list) else [entries]
+        entries = [entry if isinstance(entry, dict) else {"repo": entry} for entry in entries]
+        repos[project] = [{**entry, "repo": Path(entry["repo"]).expanduser()} for entry in entries]
     return repos
 
 
@@ -391,7 +396,7 @@ def has_work(repo: Path, key: str) -> bool:
 
 def find_repo(key: str) -> Path:
     project = key.split("-")[0]
-    candidates = load_repos().get(project, [])
+    candidates = [entry["repo"] for entry in load_repos().get(project, [])]
     if not candidates:
         raise LookupError(f"no repo is mapped to {project} in {REPOS_FILE.name}")
     if stray := [str(repo) for repo in candidates if not (repo / ".git").exists()]:
@@ -405,6 +410,45 @@ def find_repo(key: str) -> Path:
 
 def uncommitted_changes(repo: Path) -> str:
     return git(repo, "status", "--porcelain", "--untracked-files=no")
+
+
+def environment(key: str, repo: Path) -> dict:
+    return next((entry for entry in load_repos().get(key.split("-")[0], []) if entry["repo"] == repo), {})
+
+
+def hook(repo: Path, command: str, timeout: int = ENV_TIMEOUT, quiet: bool = False) -> bool:
+    # A pipe would keep this call waiting on any process the command leaves running.
+    with tempfile.TemporaryFile() as output:
+        try:
+            code = subprocess.run(
+                command, shell=True, cwd=repo, stdout=output, stderr=subprocess.STDOUT, timeout=timeout
+            ).returncode
+        except subprocess.TimeoutExpired:
+            code = None
+        if code != 0 and not quiet:
+            output.seek(0)
+            said = " ".join(output.read().decode(errors="replace").split())[-300:]
+            log.warning("    `%s` failed: %s", command, f"no result after {timeout}s" if code is None else said or f"exit {code}")
+    return code == 0
+
+
+def is_up(repo: Path, hooks: dict) -> bool:
+    return "check" in hooks and hook(repo, hooks["check"], timeout=min(30, ENV_TIMEOUT), quiet=True)
+
+
+async def start_environment(repo: Path, hooks: dict) -> bool:
+    if not hook(repo, hooks["up"]):
+        return False
+    if "check" not in hooks:
+        return True
+    try:
+        with anyio.fail_after(ENV_TIMEOUT):
+            while not is_up(repo, hooks):
+                await asyncio.sleep(5)
+    except TimeoutError:
+        log.warning("    `%s` still fails %ss after `up`", hooks["check"], ENV_TIMEOUT)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +716,27 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path, resumed: dict
         notify(f"{key} needs attention")
 
 
+async def process_in_environment(
+    client: httpx.AsyncClient, key: str, repo: Path, resumed: dict | None = None, note: str = ""
+):
+    hooks = environment(key, repo)
+    ours ="up" in hooks and not is_up(repo, hooks)
+    try:
+        if ours:
+            log.info("    Starting the local environment...")
+            if not await start_environment(repo, hooks):
+                log.warning("  ■ %s not started: its local environment didn't come up", key)
+                if key not in stranded:
+                    stranded.add(key)
+                    notify(f"{key} not started: its local environment didn't come up")
+                return
+        stranded.discard(key)
+        await process(client, key, repo, resumed, note)
+    finally:
+        if ours and "down" in hooks and hook(repo, hooks["down"]):
+            log.info("    Stopped the local environment")
+
+
 async def go_live(key: str, repo: Path, seen: str | None):
     session_id = str(uuid.uuid4())
     entry = {"status": "running", "seen": seen, "repo": str(repo), "session_id": session_id, "started_at": now()}
@@ -764,7 +829,7 @@ async def poll(client: httpx.AsyncClient):
             log.warning("    %s has uncommitted changes, leaving %s for the next poll", repo, key)
             continue
 
-        await process(client, key, repo)
+        await process_in_environment(client, key, repo)
 
 
 async def run_named(client: httpx.AsyncClient, keys: list[str], live: bool):
@@ -781,7 +846,7 @@ async def run_named(client: httpx.AsyncClient, keys: list[str], live: bool):
         if live:
             await go_live(key, repo, None)
         else:
-            await process(client, key, repo)
+            await process_in_environment(client, key, repo)
 
 
 def session_in_use(session_id: str) -> bool:
@@ -802,7 +867,7 @@ async def resume_session(client: httpx.AsyncClient, key: str, note: str):
         problem = f"{repo} has uncommitted changes"
     else:
         log.info("  → %s, back in session %s (%s)", key, session_id, str(repo).replace(str(Path.home()), "~"))
-        await process(client, key, repo, entry, note)
+        await process_in_environment(client, key, repo, entry, note)
         return
     log.error("  ✗ %s not resumed: %s", key, problem)
 

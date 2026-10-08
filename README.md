@@ -30,11 +30,19 @@ Then fill out `repos.json`. It maps each Jira project key to the repo that proje
 ```json
 {
   "ABC": "~/code/abc-store",
-  "XYZ": ["~/code/xyz-b2c", "~/code/xyz-b2b"]
+  "XYZ": ["~/code/xyz-b2c", "~/code/xyz-b2b"],
+  "LMN": {
+    "repo": "~/code/lmn/src",
+    "check": "curl -skf -o /dev/null https://lmn.test/",
+    "up": "docker compose up -d",
+    "down": "docker compose stop"
+  }
 }
 ```
 
 A path is the git repo itself, which isn't always the project root. A project with more than one repo lists them all (see [Known issues](#known-issues)). A ticket whose project isn't in the file is skipped with a notification. It's picked up on a later poll once the project is added.
+
+A project whose local site isn't left running, like one in a Docker stack, uses the longer form. `repo` is the path. `check`, `up`, and `down` are the commands Cadgentic uses to start that site before a run and stop it afterward (see [Local environments](#local-environments)).
 
 Both files are in `.gitignore` so your Jira token and repo paths stay out of the repo.
 
@@ -90,8 +98,9 @@ Each new ticket gets its own Claude Code session, and sessions run one at a time
 
 1. The ticket's project key picks the repo from `repos.json`.
 2. The ticket waits a random `DELAY_MIN` to `DELAY_MAX` seconds. It's then looked up again because a ticket can be reassigned or moved during the wait.
-3. The ticket is moved to `IN_PROGRESS_STATUS`, and a session starts in that repo in auto mode with the prompt `/ticket <key>`. Its system prompt says the run is unattended. The `ticket` and `ready-for-review` skills change what they do on that and nothing else.
-4. When the session ends, the script looks the ticket up once more. If it's still assigned to you and still in progress, `/ticket` stopped early and the log has its last words. Otherwise it's recorded as handed off.
+3. If the project names a [local environment](#local-environments) that isn't up, Cadgentic starts it. It's stopped again when the session ends.
+4. The ticket is moved to `IN_PROGRESS_STATUS`, and a session starts in that repo in auto mode with the prompt `/ticket <key>`. Its system prompt says the run is unattended. The `ticket` and `ready-for-review` skills change what they do on that and nothing else.
+5. When the session ends, the script looks the ticket up once more. If it's still assigned to you and still in progress, `/ticket` stopped early and the log has its last words. Otherwise it's recorded as handed off.
 
 A poll lasts as long as the waits and runs it starts. The next search comes `POLL_INTERVAL` seconds after the last of them ends.
 
@@ -122,6 +131,37 @@ Three limits apply to every run:
 3. It can't run forever. `RUN_TIMEOUT` stops a run by the clock and `MAX_BUDGET_USD` stops it by cost.
 
 The Jira API token is also blanked in the session's environment so the agent's shell can't read it.
+
+### Local environments
+
+Some projects need a local environment that a run can't count on being up, like a Docker stack you only start when you're working on it. Give that project's entry in `repos.json` three shell commands. Each one runs from the repo's directory.
+
+| Command | What it does |
+|---|---|
+| `check` | Exits 0 when the environment is up. |
+| `up` | Starts it. |
+| `down` | Stops it. |
+
+Before a ticket's run starts, Cadgentic runs `check`. That covers a polled ticket, a ticket passed by key, and `resume`.
+
+- If `check` passes, the environment was already up. The run uses it. Cadgentic leaves it running afterward since it didn't start it.
+- If `check` fails, Cadgentic runs `up`, runs `check` every 5 seconds until it passes, and then starts the run. When the run ends it runs `down`, however the run ended: handed off, stopped early, failed, timed out, or interrupted with Ctrl-C.
+
+The environment is started before the session, not by the agent inside it, for two reasons:
+
+1. It gets stopped even when the run fails or times out.
+2. An MCP server that lives inside the environment, like one started with `docker exec`, only connects if the environment is up when the session starts.
+
+If `up` fails, or `check` still fails `ENV_TIMEOUT` seconds after `up` (300 by default), the run doesn't start. Cadgentic runs `down` to clean up and logs the command that failed with the end of its output. Nothing is recorded for the ticket and it isn't moved in Jira, so a polled ticket is tried again on the next poll. You get one notification per ticket, not one per poll.
+
+A few things to know when writing the commands:
+
+- They run in your shell with nobody watching. `up` and `down` each get `ENV_TIMEOUT` seconds to finish. `check` gets 30 seconds per try, so have it give up sooner than that.
+- `up` has to return once the environment is starting. A command that stays in the foreground, like a start script that ends in a file watcher, counts as failed when it times out.
+- An entry with `up` and no `check` is started and stopped around every run since Cadgentic can't tell whether it was already up.
+- Environments that bind the same ports can't be up together. Runs go one at a time so two of Cadgentic's never overlap. One you started yourself can still be in the way. Then `up` or `check` fails and the ticket waits for the next poll.
+
+Go-live runs don't start an environment. Anything that lives inside the session is still the agent's to start, like a dev server or a file watcher the skill runs in the background.
 
 ### When a ticket is sent back
 
@@ -207,5 +247,6 @@ The `go_live` entry is tracked on its own. A ticket with a status is still picke
 - A project with more than one repo only routes a ticket that already has a branch or commits in one of them. A new ticket in one of those projects is skipped until its work is started by hand.
 - A ticket that's sent back is only picked up when its last run handed it off. If that run stopped early or failed and you finished the ticket by hand, it's skipped when it comes back. Pass its key to run it.
 - A poll doesn't hand a ticket to `/go-live` a second time once it has gone live, even after a later round is approved. Pass its key with `go-live`.
+- A ticket whose local environment won't come up is tried again on every poll, each time after its usual wait, until the environment starts or you take the ticket out of the search.
 - A failed run isn't retried even when the cause was temporary. Its ticket stays In Progress until you resume it, run it again, or move it yourself.
 - The notification is macOS only.
