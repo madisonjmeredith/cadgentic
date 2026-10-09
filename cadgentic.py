@@ -116,6 +116,10 @@ ALLOWED_TOOLS = [
     "Read(~/Downloads/**)",
     "mcp__atlassian__getJiraIssue",
     "mcp__atlassian__getJiraIssueRemoteIssueLinks",
+    "mcp__bitbucket__getBitbucketRepository",
+    "mcp__bitbucket__listBitbucketRepoPullRequests",
+    "mcp__bitbucket__createBitbucketRepoPullRequest",
+    "mcp__bitbucket__addBitbucketRepoPullRequestComment",
 ]
 JIRA_WRITE_TOOLS = (
     "mcp__atlassian__addCommentToJiraIssue",

@@ -72,7 +72,7 @@ Every ticket-lane entry point (`poll()`, `run_named()`, `resume_session()`) reac
 Four layers, set up in `run_ticket()`:
 
 1. `DISALLOWED_TOOLS` removes every Jira write a run has no use for, plus whatever `EXTRA_DISALLOWED_TOOLS` names in `.env`. Madison's `.env` uses it to remove a client's Jira server, so never drop or empty that setting.
-2. `ALLOWED_TOOLS` pre-approves the Jira reads and `~/Downloads/**`, where `/ticket` puts attachments.
+2. `ALLOWED_TOOLS` pre-approves the Jira reads and `~/Downloads/**`, where `/ticket` puts attachments. It also pre-approves the four `bitbucket` MCP tools the skills use on a Bitbucket repo: looking up the repo, listing its pull requests, creating one, and commenting on one. On GitHub the same work goes through `gh` in the shell, so it needs no entry here.
 3. `jira_gate()` is a `PreToolUse` hook on the three `JIRA_WRITE_TOOLS`. It allows a write only on the run's own ticket, and `editJiraIssue` only when `assignee` is the one field. It both grants and refuses, so these writes never reach layer 4.
 4. `can_use_tool()` gets whatever auto mode would still put to a person. It answers `AskUserQuestion` with the option marked "(Recommended)" or the first one, saves the plan from `ExitPlanMode` and approves it, approves browser calls that only look at a page (`BROWSER_READS`, `LOOKING_ACTIONS`), and refuses everything else. With `AUTO_APPROVE_PLAN=false` the plan is refused with a note to stop, and the run is recorded as `planned`.
 
@@ -82,6 +82,8 @@ Auto mode's classifier runs ahead of layer 4 and refuses on its own. A refusal g
 
 Sessions load Madison's real user settings, skills, hooks, and MCP servers (`setting_sources`, `skills="all"`), so a change under `~/.claude` changes what a run does. The agent reaches Jira through the `atlassian` MCP server. The script's own REST calls use the API token, which is blanked in the agent's environment.
 
+The agent reaches Bitbucket through a second server, `bitbucket`, whose sign-in also covers Jira and Confluence. The layers above only watch the `atlassian` prefix, so the limits on `bitbucket` live in `~/.claude`: `hooks/bitbucket-server-scope.sh` refuses every tool on it that isn't a Bitbucket one, `hooks/enforce-pr-skill-bitbucket.sh` refuses a pull request the `pull-request` skill didn't open, and `settings.json` denies merging and approving. A run's Jira limits depend on that first hook, so don't remove it without adding the same limit here.
+
 ### The contract with the skills
 
 The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`, `ready-for-review`, `qa`, `go-live`), with `qa`'s checker in `~/.claude/agents/qa-checker.md`. These strings and conventions are shared, so change both sides together:
@@ -89,7 +91,7 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 | In `cadgentic.py` | On the skill side |
 |---|---|
 | `UNATTENDED`, `GO_LIVE_UNATTENDED` (appended to the system prompt) | A skill treats a run as unattended only when the system prompt says Cadgentic started it. |
-| `RECORD_HEADING` | `ticket` posts the answered questions on the pull request under this exact heading. `record_on_pull_request()` posts `decisions/<KEY>.md` when no comment posted since the run started has it. |
+| `RECORD_HEADING` | `ticket` posts the answered questions on the pull request under this exact heading, on GitHub or Bitbucket. `record_on_pull_request()` posts `decisions/<KEY>.md` when no comment posted since the run started has it. It works through `gh`, so on Bitbucket it does nothing and the skill's comment is the only one. |
 | `poll()` re-running a `handed_off` ticket with the same `AGENT_PROMPT` | `ticket` switches to its follow-up flow when the ticket's branch or `[<KEY>]` commits exist. In an unattended run it stops when the latest comment is Madison's own. |
 | `RESUME_PROMPT` | Nothing. A resumed session isn't handed `/ticket` again, so it works from the skill text already in its context. |
 | `OUTCOME` | `go-live` ends its report with `go-live <KEY>: <outcome>`. No match is recorded as `unknown`. |

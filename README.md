@@ -114,7 +114,7 @@ A run won't start while its repo has uncommitted changes to tracked files since 
 Three things that `/ticket` normally waits on go ahead in a run:
 
 1. The plan. It's saved to `plans/<KEY>.md` and approved.
-2. Questions. Each one gets the option marked as recommended, or the first one listed. The questions, the answers, and the alternatives are saved to `decisions/<KEY>.md`. `/ticket` also writes them up as a comment on the ticket's pull request when the repo is on GitHub and the pull request exists. If that comment is missing when the run ends, the script posts the saved record in its place.
+2. Questions. Each one gets the option marked as recommended, or the first one listed. The questions, the answers, and the alternatives are saved to `decisions/<KEY>.md`. `/ticket` also writes them up as a comment on the ticket's pull request when the repo is on GitHub or Bitbucket and the pull request exists. If that comment is missing when the run ends, the script posts the saved record in its place. It can only do that on GitHub.
 3. The handoff. `ready-for-review` posts the comment, assigns the ticket, and moves it to Testing. It holds the handoff when its own checks say the work isn't ready, like a QA pass that failed.
 
 Set `AUTO_APPROVE_PLAN=false` to hold plans instead. A run then ends once the plan is written, and the log prints the command that resumes the session so you can approve it:
