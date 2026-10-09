@@ -19,6 +19,7 @@ Run:
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -43,6 +44,11 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     PermissionUpdate,
     ResultMessage,
+    SystemMessage,
+    TERMINAL_TASK_STATUSES,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     ToolUseBlock,
     query,
@@ -89,6 +95,7 @@ APPROVED_STATUS = setting("APPROVED_STATUS", "Approved")
 REVIEW_STATUSES = [s.strip() for s in setting("REVIEW_STATUSES", "Testing,Client Testing").split(",") if s.strip()]
 AUTO_APPROVE_PLAN = setting("AUTO_APPROVE_PLAN", "true").lower() in ("1", "true", "yes")
 RUN_TIMEOUT = int(setting("RUN_TIMEOUT", "7200"))
+BACKGROUND_TIMEOUT = int(setting("BACKGROUND_TIMEOUT", "600"))
 ENV_TIMEOUT = int(setting("ENV_TIMEOUT", "300"))
 MAX_BUDGET_USD = float(setting("MAX_BUDGET_USD", "0")) or None
 EXTRA_DISALLOWED_TOOLS = [s.strip() for s in setting("EXTRA_DISALLOWED_TOOLS", "").split(",") if s.strip()]
@@ -621,7 +628,7 @@ async def run_ticket(
             # A screenshot comes back as one JSON line, and the SDK's 1 MB default can't hold it.
             max_buffer_size=64 * 1024 * 1024,
             # Keep the Jira token out of the agent's shell.
-            env={"JIRA_API_TOKEN": ""},
+            env={"JIRA_API_TOKEN": "", "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"},
             stderr=write,
         )
 
@@ -629,10 +636,27 @@ async def run_ticket(
         if resume_prompt:
             write(f"[resumed] {' '.join(resume_prompt.split())}")
         prompt = resume_prompt or (GO_LIVE_PROMPT if live else AGENT_PROMPT).format(key=key)
-        with anyio.fail_after(RUN_TIMEOUT):
-            async for message in query(prompt=prompt, options=options):
+        over = anyio.Event()
+        shells: set[str] = set()
+        state = None
+
+        # Given a string prompt, the SDK closes the CLI's input mid-run and the hook and can_use_tool() go dead.
+        async def prompts():
+            yield {"type": "user", "session_id": "", "message": {"role": "user", "content": prompt}, "parent_tool_use_id": None}
+            await over.wait()
+
+        def at_rest():
+            if shells:
+                waiting.deadline = anyio.current_time() + BACKGROUND_TIMEOUT
+            else:
+                over.set()
+
+        with anyio.fail_after(RUN_TIMEOUT), anyio.CancelScope() as waiting:
+            async for message in query(prompt=prompts(), options=options):
                 if isinstance(message, AssistantMessage):
                     nested = message.parent_tool_use_id is not None
+                    if not nested:
+                        waiting.deadline = math.inf
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             write(block.text)
@@ -645,9 +669,26 @@ async def run_ticket(
                             if summary and summary != last_shown and (" · " in summary or not nested):
                                 show(summary, DIM, nested)
                                 last_shown = summary
+                elif isinstance(message, TaskStartedMessage):
+                    if message.task_type == "local_bash":
+                        shells.add(message.task_id)
+                elif isinstance(message, (TaskNotificationMessage, TaskUpdatedMessage)):
+                    if message.status in TERMINAL_TASK_STATUSES:
+                        shells.discard(message.task_id)
+                elif isinstance(message, SystemMessage) and message.subtype == "session_state_changed":
+                    state = message.data.get("state")
+                    if state != "idle":
+                        waiting.deadline = math.inf
+                    elif result:
+                        at_rest()
                 elif isinstance(message, ResultMessage):
                     result = message
+                    if state in (None, "idle"):
+                        at_rest()
 
+        if waiting.cancelled_caught:
+            write(f"[gave up] on a background command still running {BACKGROUND_TIMEOUT}s after the last turn")
+            show(f"Stopped waiting on a background command after {BACKGROUND_TIMEOUT}s", YELLOW)
         if result is None:
             raise RuntimeError("the run ended without a result")
         write(f"--- {now()} {result.subtype}, {result.num_turns} turns, ${result.total_cost_usd or 0:.2f}")

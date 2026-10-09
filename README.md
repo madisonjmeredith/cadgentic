@@ -103,6 +103,8 @@ Each new ticket gets its own Claude Code session, and sessions run one at a time
 4. The ticket is moved to `IN_PROGRESS_STATUS`, and a session starts in that repo in auto mode with the prompt `/ticket <key>`. Its system prompt says the run is unattended. The `ticket` and `ready-for-review` skills change what they do on that and nothing else.
 5. When the session ends, the script looks the ticket up once more. If it's still assigned to you and still in progress, `/ticket` stopped early and the log has its last words. Otherwise it's recorded as handed off.
 
+A session can end a turn while it waits on a command it left running in the background, like a watch on a deploy. The run stays open until the command finishes and the session carries on. If nothing has woken the session `BACKGROUND_TIMEOUT` seconds after a turn (600 by default), the run ends and the command is stopped with it. That's the usual end for a run that never stopped its dev server. Raise the setting if your deploys take longer than that. Waits on subagents aren't limited by it.
+
 A poll lasts as long as the waits and runs it starts. The next search comes `POLL_INTERVAL` seconds after the last of them ends.
 
 A run won't start while its repo has uncommitted changes to tracked files since the agent would be switching branches underneath them. The ticket is left for the next poll. A ticket you passed by key is skipped with an error.
