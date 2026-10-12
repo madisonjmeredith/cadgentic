@@ -100,7 +100,7 @@ The skills a run drives live outside this repo, in `~/.claude/skills/` (`ticket`
 | `has_work()`, `record_on_pull_request()` | Branches are `feature/<KEY>` and commit subjects carry `[<KEY>]`. |
 | `process_in_environment()` and a project's `check`, `up`, `down` in `repos.json` | On a Lightning repo, or any other project in a Docker stack, `ticket` expects the stack to be up when an unattended run starts, and leaves the containers alone. When the local site doesn't answer, or fails for a reason that isn't the change's, the run skips the local check, deploys for review, and checks the work there. |
 | `BACKGROUND_TIMEOUT` | On a Magento Cloud repo (`.magento.app.yaml`), `ticket` deploys by pushing `staging` to the Cloud remote in the background, and ends its turn until the push returns. One measured deploy took 12 minutes, so the 600-second default cuts the run off partway. The deploy carries on without it, and a resumed run confirms it on the staging site. |
-| `GO_LIVE_EXTRA_JQL` | `go-live` covers standard Shopify stores only. The setting keeps other projects' approved tickets out of the go-live search. |
+| `GO_LIVE_EXTRA_JQL` | `go-live` covers standard Shopify stores and Lightning projects. The setting keeps other projects' approved tickets out of the go-live search. |
 
 A Magento Cloud project has its own flow in `ticket`, and the script has no part in it either. The agent's shell pushes `staging` to two remotes: `origin`, then the one on `magento.cloud`, where the push is the deploy. Nothing in it pushes the base branch. `go-live` doesn't cover these projects, so keep them in `GO_LIVE_EXTRA_JQL`.
 
