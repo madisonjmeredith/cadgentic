@@ -117,6 +117,8 @@ Three things that `/ticket` normally waits on go ahead in a run:
 2. Questions. Each one gets the option marked as recommended, or the first one listed. The questions, the answers, and the alternatives are saved to `decisions/<KEY>.md`. `/ticket` also writes them up as a comment on the ticket's pull request when the repo is on GitHub or Bitbucket and the pull request exists. If that comment is missing when the run ends, the script posts the saved record in its place. It can only do that on GitHub.
 3. The handoff. `ready-for-review` posts the comment, assigns the ticket, and moves it to Testing. It holds the handoff when its own checks say the work isn't ready, like a QA pass that failed.
 
+The reply on a research ticket never goes ahead. A research ticket asks for an answer instead of a change, like an assessment or an estimate. The run does the research, builds nothing, and saves a draft of the reply in `~/Downloads/<KEY>/`. It never posts the draft since the reply goes to the client as written, often with an hours estimate in it. The run ends `finished` with the draft in the log. Read it and post it yourself. `resume` won't post it either. To carry on in the session by hand, use `open`.
+
 Set `AUTO_APPROVE_PLAN=false` to hold plans instead. A run then ends once the plan is written, and the log prints the command that resumes the session so you can approve it:
 
 ```sh
@@ -237,7 +239,7 @@ Everything the script writes sits next to it and is listed in `.gitignore`:
 |---|---|
 | `running` | A run is in progress. |
 | `handed_off` | The run ended and the ticket has moved on from In Progress or to someone else. |
-| `finished` | The run ended and the ticket is still yours and still In Progress. `/ticket` stopped before the handoff. |
+| `finished` | The run ended and the ticket is still yours and still In Progress. `/ticket` stopped before the handoff. A research ticket always ends this way since its reply is held for you to post. |
 | `planned` | The plan is waiting for approval (`AUTO_APPROVE_PLAN=false`). |
 | `failed` | The run errored, timed out, or was interrupted. |
 

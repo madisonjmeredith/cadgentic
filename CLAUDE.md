@@ -106,6 +106,8 @@ A Magento Cloud project has its own flow in `ticket`, and the script has no part
 
 A project that isn't a Shopify theme, a Lightning build, or a Magento Cloud site has no flow of its own in `ticket`. It deploys by the "Deploying for review" section in the project's `CLAUDE.md` (the skill's project flow), and the script has no part in it. That section can make `main` the review branch and name a command that deploys over SSH. A run on such a project merges into `main`, pushes it, and reaches a server from the agent's shell, with whatever SSH agent the script was started with. `go-live` doesn't cover these projects either, so keep them in `GO_LIVE_EXTRA_JQL`.
 
+A research ticket asks for an answer and not a change, like an assessment or an estimate. `ticket` has a section for it, and the script has no part in it either. The run builds nothing, saves a draft of the reply in `~/Downloads/<KEY>/`, and never posts it, on a first run or a resumed one. So it always ends `finished`, with the "stopped before the handoff" notification. That's the expected end, not a failure to chase. Madison reads the reply first because it goes to the client, often with an hours estimate. The hold is `ticket`'s own rule. Don't move it into whichever skill drafts the reply, and don't have the script or a resumed run post it.
+
 ### State
 
 `processed_tickets.json` has one entry per ticket. Its top-level fields belong to the ticket lane and its `go_live` object to the go-live lane. `record()` merges one level deep, so `go_live()` writes the whole `go_live` object each time.
