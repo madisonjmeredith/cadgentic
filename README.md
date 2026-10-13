@@ -31,7 +31,10 @@ Then fill out `repos.json`. It maps each Jira project key to the repo that proje
 ```json
 {
   "ABC": "~/code/abc-store",
-  "XYZ": ["~/code/xyz-b2c", "~/code/xyz-b2b"],
+  "XYZ": [
+    { "repo": "~/code/xyz-store", "match": "xyz\\.example|shopify" },
+    { "repo": "~/code/xyz-trade", "match": "xyz-trade\\.example|wholesale", "go_live": false }
+  ],
   "LMN": {
     "repo": "~/code/lmn/src",
     "check": "curl -skf -o /dev/null https://lmn.test/",
@@ -45,7 +48,9 @@ Then fill out `repos.json`. It maps each Jira project key to the repo that proje
 }
 ```
 
-A path is the git repo itself, which isn't always the project root. A project with more than one repo lists them all (see [Known issues](#known-issues)). A ticket whose project isn't in the file is skipped with a notification. It's picked up on a later poll once the project is added.
+A path is the git repo itself, which isn't always the project root. A ticket whose project isn't in the file is skipped with a notification. It's picked up on a later poll once the project is added.
+
+A project with more than one repo lists them all. Each one gets a `match` pattern that says which tickets are its own (see [Projects with more than one repo](#projects-with-more-than-one-repo)). `"go_live": false` keeps a repo's approved tickets away from `/go-live` (see [Going live](#going-live)).
 
 A project whose local site isn't left running, like one in a Docker stack, uses the longer form. `repo` is the path. `check`, `up`, and `down` are the commands Cadgentic uses to start that site before a run and stop it afterward (see [Local environments](#local-environments)).
 
@@ -103,7 +108,7 @@ Every `POLL_INTERVAL` seconds the script searches Jira for tickets assigned to y
 
 Each new ticket gets its own Claude Code session, and sessions run one at a time:
 
-1. The ticket's project key picks the repo from `repos.json`.
+1. The ticket's project key picks the repo from `repos.json`. In a project with [more than one repo](#projects-with-more-than-one-repo), the ticket's wording picks between them.
 2. The ticket waits a random `DELAY_MIN` to `DELAY_MAX` seconds. It's then looked up again because a ticket can be reassigned or moved during the wait.
 3. If the project names a [local environment](#local-environments) that isn't up, Cadgentic starts it. It's stopped again when the session ends.
 4. The ticket is moved to `IN_PROGRESS_STATUS`, and a session starts in that repo in auto mode with the prompt `/ticket <key>`. Its system prompt says the run is unattended. The `ticket` and `ready-for-review` skills change what they do on that. A [store that hasn't launched](#stores-that-havent-launched) adds one more line, which changes where the work is reviewed.
@@ -143,6 +148,30 @@ Three limits apply to every run:
 
 The Jira API token is also blanked in the session's environment so the agent's shell can't read it.
 
+### Projects with more than one repo
+
+One Jira project can cover more than one codebase, like a storefront and a separate wholesale site. List each repo under the project and give it a `match` pattern:
+
+```json
+"XYZ": [
+  { "repo": "~/code/xyz-store", "match": "xyz\\.example|shopify" },
+  { "repo": "~/code/xyz-trade", "match": "xyz-trade\\.example|wholesale", "go_live": false }
+]
+```
+
+`match` is a regular expression. It's tested against the ticket's summary and description with case ignored. The address of every link in the description counts as text. Backslashes are doubled because the file is JSON.
+
+A ticket's repo is picked in two steps:
+
+1. Existing work comes first. If only one of the repos has a `feature/<KEY>` branch or a commit marked `[<KEY>]`, the ticket goes there whatever its wording says.
+2. The patterns decide the rest. They're tried on the repos that have the ticket's work, or on all of them when none does. The ticket goes to the repo whose pattern is the only one that matches.
+
+A ticket is skipped with a notification when no pattern matches it or more than one does. It's picked up on a later poll once its wording settles the question. The quickest fix is to add the site's address to the description. A pattern that isn't a valid regular expression skips every ticket the patterns would have decided. The notification names the problem.
+
+A key passed on the command line is routed by the same rules.
+
+An entry in the list takes the same keys as any other. `check`, `up`, `down`, `review`, and `go_live` apply to that repo and not to the rest of the project.
+
 ### Local environments
 
 Some projects need a local environment that a run can't count on being up, like a Docker stack you only start when you're working on it. Give that project's entry in `repos.json` three shell commands. Each one runs from the repo's directory.
@@ -171,6 +200,7 @@ A few things to know when writing the commands:
 - `up` has to return once the environment is starting. A command that stays in the foreground, like a start script that ends in a file watcher, counts as failed when it times out.
 - An entry with `up` and no `check` is started and stopped around every run since Cadgentic can't tell whether it was already up.
 - Environments that bind the same ports can't be up together. Runs go one at a time so two of Cadgentic's never overlap. One you started yourself can still be in the way. Then `up` or `check` fails and the ticket waits for the next poll.
+- `up` can clear the way itself. Start it with the command that stops the other environment, like one that quits a local web server holding ports 80 and 443. End that command with `;` instead of `&&` so `up` carries on when there was nothing to stop.
 
 Go-live runs don't start an environment. Anything that lives inside the session is still the agent's to start, like a dev server or a file watcher the skill runs in the background.
 
@@ -265,6 +295,8 @@ A ticket that came back `ready`, `held`, `not-approved`, or `unknown` is looked 
 
 `GO_LIVE_EXTRA_JQL` is ANDed onto the search for approved tickets and nothing else. Use it to keep a project that `/go-live` doesn't cover out of this lane, e.g., `GO_LIVE_EXTRA_JQL='project not in (LMN)'`. Without it an approved ticket in that project is handed to `/go-live`, which can only stop, and the ticket is looked at again each time it changes in Jira. Passing a key with `go-live` still runs it.
 
+That setting works by project, which doesn't help when a project has one repo `/go-live` covers and one it doesn't. Mark the second repo's entry in `repos.json` with `"go_live": false`. A poll then leaves that repo's approved tickets alone and notifies you so you can take each one live by hand. You get one notification per ticket, not one per poll. Passing a key with `go-live` still runs it here too.
+
 An approved ticket on a [store that hasn't launched](#stores-that-havent-launched) is already on the live theme, so `/go-live` has nothing to deploy. It confirms that the branch is in `main` and that the Deploy run for it succeeded. Then it posts the "deployed live" comment, assigns the ticket back, and moves it to Deployed. Trial mode doesn't hold that up, and the outcome is `deployed`. A ticket with deployment notes is still held. If the branch isn't in `main` because its run took the preview flow or stopped early, `/go-live` treats the ticket like any other. Leave a marked project out of `GO_LIVE_EXTRA_JQL`.
 
 Set `GO_LIVE=false` to leave approved tickets alone.
@@ -292,7 +324,7 @@ The `go_live` entry is tracked on its own. A ticket with a status is still picke
 
 ## Known issues
 
-- A project with more than one repo only routes a ticket that already has a branch or commits in one of them. A new ticket in one of those projects is skipped until its work is started by hand.
+- A new ticket in a project with more than one repo is skipped when its summary and description match none of the repos' patterns, or more than one. It waits until the ticket's wording names the site.
 - A ticket that's sent back is only picked up when its last run handed it off. If that run stopped early or failed and you finished the ticket by hand, it's skipped when it comes back. Pass its key to run it.
 - A poll doesn't hand a ticket to `/go-live` a second time once it has gone live, even after a later round is approved. Pass its key with `go-live`.
 - A ticket whose local environment won't come up is tried again on every poll, each time after its usual wait, until the environment starts or you take the ticket out of the search.

@@ -1,6 +1,9 @@
 {
   "ABC": "~/code/abc-store",
-  "XYZ": ["~/code/xyz-b2c", "~/code/xyz-b2b"],
+  "XYZ": [
+    { "repo": "~/code/xyz-store", "match": "xyz\\.example|shopify" },
+    { "repo": "~/code/xyz-trade", "match": "xyz-trade\\.example|wholesale", "go_live": false }
+  ],
   "LMN": {
     "repo": "~/code/lmn/src",
     "check": "curl -skf -o /dev/null https://lmn.test/",

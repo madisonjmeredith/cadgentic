@@ -204,6 +204,7 @@ RECHECKED = {"ready", "held", "not-approved", "unknown"}
 log = logging.getLogger("cadgentic")
 unroutable: set[str] = set()
 stranded: set[str] = set()
+by_hand: set[str] = set()
 comment_reads: dict[str, tuple[str | None, bool]] = {}
 me = ""
 
@@ -309,7 +310,7 @@ async def fetch_tickets(client: httpx.AsyncClient, key: str | None = None, start
 
 async def search(client: httpx.AsyncClient, jql: str) -> list[dict]:
     tickets = []
-    params = {"jql": jql, "fields": "summary,status,assignee,updated", "maxResults": 100}
+    params = {"jql": jql, "fields": "summary,description,status,assignee,updated", "maxResults": 100}
     while True:
         resp = await client.get("/rest/api/3/search/jql", params=params)
         resp.raise_for_status()
@@ -329,6 +330,23 @@ def adf_parts(node, text: list[str], mentions: set[str]):
         mentions.add(node.get("attrs", {}).get("id", ""))
     for child in node.get("content", []):
         adf_parts(child, text, mentions)
+
+
+def ticket_text(ticket: dict) -> str:
+    fields = ticket.get("fields", {})
+    parts = [fields.get("summary") or ""]
+
+    def read(node):
+        if not isinstance(node, dict):
+            return
+        # Jira keeps a pasted URL in a card node with no text, and a link's address in a mark.
+        parts.append((node.get("attrs") or {}).get("url") or node.get("text") or "")
+        parts.extend((mark.get("attrs") or {}).get("href") or "" for mark in node.get("marks") or [])
+        for child in node.get("content") or []:
+            read(child)
+
+    read(fields.get("description"))
+    return " ".join(" ".join(parts).split())
 
 
 async def approved_by_comment(client: httpx.AsyncClient, ticket: dict) -> bool:
@@ -411,18 +429,25 @@ def has_work(repo: Path, key: str) -> bool:
     )
 
 
-def find_repo(key: str) -> Path:
+def find_repo(key: str, text: str) -> Path:
     project = key.split("-")[0]
-    candidates = [entry["repo"] for entry in load_repos().get(project, [])]
-    if not candidates:
+    entries = load_repos().get(project, [])
+    if not entries:
         raise LookupError(f"no repo is mapped to {project} in {REPOS_FILE.name}")
-    if stray := [str(repo) for repo in candidates if not (repo / ".git").exists()]:
+    if stray := [str(entry["repo"]) for entry in entries if not (entry["repo"] / ".git").exists()]:
         raise LookupError(f"{', '.join(stray)} isn't a git repo")
-    if len(candidates) > 1:
-        candidates = [repo for repo in candidates if has_work(repo, key)]
-    if len(candidates) != 1:
-        raise LookupError(f"{project} maps to more than one repo and none of them has work for {key} yet")
-    return candidates[0]
+    if len(entries) > 1:
+        entries = [entry for entry in entries if has_work(entry["repo"], key)] or entries
+    if len(entries) > 1:
+        try:
+            entries = [entry for entry in entries if "match" in entry and re.search(entry["match"], text, re.I)]
+        except re.error as e:
+            raise LookupError(f"a match pattern for {project} in {REPOS_FILE.name} isn't valid: {e}")
+    if len(entries) != 1:
+        raise LookupError(
+            f"{project} maps to more than one repo, and neither existing work nor a match pattern picks one for {key}"
+        )
+    return entries[0]["repo"]
 
 
 def uncommitted_changes(repo: Path) -> str:
@@ -810,6 +835,7 @@ async def process_in_environment(
                     notify(f"{key} not started: its local environment didn't come up")
                 return
         stranded.discard(key)
+        by_hand.discard(key)
         await process(client, key, repo, resumed, note)
     finally:
         if ours and "down" in hooks and hook(repo, hooks["down"]):
@@ -844,9 +870,10 @@ async def go_live(key: str, repo: Path, seen: str | None):
 # Main loop
 # ---------------------------------------------------------------------------
 
-def route(key: str) -> Path | None:
+def route(ticket: dict) -> Path | None:
+    key = ticket["key"]
     try:
-        repo = find_repo(key)
+        repo = find_repo(key, ticket_text(ticket))
     except LookupError as e:
         if key not in unroutable:
             unroutable.add(key)
@@ -855,6 +882,16 @@ def route(key: str) -> Path | None:
         return None
     unroutable.discard(key)
     return repo
+
+
+def goes_live(key: str, repo: Path) -> bool:
+    if repo_entry(key, repo).get("go_live", True):
+        return True
+    if key not in by_hand:
+        by_hand.add(key)
+        log.info("  · %s looks approved, and go-live is off for its repo: take it live by hand", key)
+        notify(f"{key} looks approved: take it live by hand")
+    return False
 
 
 async def wait_turn(key: str, summary: str, repo: Path):
@@ -869,13 +906,13 @@ async def poll(client: httpx.AsyncClient):
     approved = [
         (ticket, repo)
         for ticket in (await approved_tickets(client, state) if GO_LIVE else [])
-        if (repo := route(ticket["key"]))
+        if (repo := route(ticket)) and goes_live(ticket["key"], repo)
     ]
     # A handed-off ticket had left the queue, so it's only found here once someone sends it back.
     ready = [
         (ticket, repo)
         for ticket in sorted(await fetch_tickets(client), key=status_rank)
-        if state.get(ticket["key"], {}).get("status") in (None, "handed_off") and (repo := route(ticket["key"]))
+        if state.get(ticket["key"], {}).get("status") in (None, "handed_off") and (repo := route(ticket))
     ]
     if not approved and not ready:
         log.info("No new tickets")
@@ -914,7 +951,11 @@ async def poll(client: httpx.AsyncClient):
 async def run_named(client: httpx.AsyncClient, keys: list[str], live: bool):
     for key in keys:
         try:
-            repo = find_repo(key)
+            found = await search(client, f'key = "{key}"')
+        except httpx.HTTPError:
+            found = []
+        try:
+            repo = find_repo(key, ticket_text(found[0]) if found else "")
         except LookupError as e:
             log.error("  ✗ %s skipped: %s", key, e)
             continue
