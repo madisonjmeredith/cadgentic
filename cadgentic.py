@@ -181,6 +181,12 @@ GO_LIVE_WAITS = (
     "This is an unattended go-live run, so nobody can answer or give a go-ahead. "
     "Present the hold or the pause the way the skill says and end the run."
 )
+REVIEW_LIVE = (
+    "Cadgentic is set up to have this project's work reviewed on the live theme, "
+    "because its store hasn't launched."
+)
+# Must match what /ticket runs word for word, or auto mode can refuse them as a production deploy.
+REVIEW_DEPLOY = ("~/.claude/scripts/theme-sync main --merge feature/{key}", "git push origin main")
 # /go-live ends its report with this line.
 OUTCOME = re.compile(r"^go-live (\S+): (deployed|ready|held|not-approved|already-live|failed|dry-run)\s*$", re.M)
 GO_LIVE_NOTES = {
@@ -423,7 +429,7 @@ def uncommitted_changes(repo: Path) -> str:
     return git(repo, "status", "--porcelain", "--untracked-files=no")
 
 
-def environment(key: str, repo: Path) -> dict:
+def repo_entry(key: str, repo: Path) -> dict:
     return next((entry for entry in load_repos().get(key.split("-")[0], []) if entry["repo"] == repo), {})
 
 
@@ -555,6 +561,26 @@ def jira_gate(key: str):
     return gate
 
 
+def deploy_grant(key: str, repo: Path, write):
+    granted = {command.format(key=key) for command in REVIEW_DEPLOY}
+
+    async def grant(hook_input, tool_use_id, context):
+        command = " ".join(hook_input["tool_input"].get("command", "").split())
+        if command not in granted or Path(hook_input["cwd"]).resolve() != repo.resolve():
+            return {}
+        write(f"[granted] {command}")
+        show(f"Approved: {command}", GREEN)
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": REVIEW_LIVE,
+            }
+        }
+
+    return grant
+
+
 async def run_ticket(
     key: str, repo: Path, session_id: str, decisions: list[dict], live: bool = False, resume_prompt: str = ""
 ) -> tuple[bool, str]:
@@ -611,6 +637,12 @@ async def run_ticket(
             briefing = GO_LIVE_UNATTENDED.format(key=key)
         else:
             briefing = UNATTENDED.format(key=key, plan=PLAN_APPROVED if AUTO_APPROVE_PLAN else PLAN_HELD)
+        on_live = repo_entry(key, repo).get("review") == "live"
+        gates = [HookMatcher(matcher="|".join(JIRA_WRITE_TOOLS), hooks=[jira_gate(key)])]
+        if on_live:
+            briefing += " " + REVIEW_LIVE
+        if on_live and not live:
+            gates.append(HookMatcher(matcher="Bash", hooks=[deploy_grant(key, repo, write)]))
 
         options = ClaudeAgentOptions(
             cwd=repo,
@@ -621,7 +653,7 @@ async def run_ticket(
             permission_mode="auto",
             system_prompt={"type": "preset", "preset": "claude_code", "append": briefing},
             can_use_tool=can_use_tool,
-            hooks={"PreToolUse": [HookMatcher(matcher="|".join(JIRA_WRITE_TOOLS), hooks=[jira_gate(key)])]},
+            hooks={"PreToolUse": gates},
             allowed_tools=ALLOWED_TOOLS,
             disallowed_tools=DISALLOWED_TOOLS,
             setting_sources=["user", "project", "local"],
@@ -637,6 +669,8 @@ async def run_ticket(
         )
 
         write(f"--- {now()} session {session_id} {'resumed ' if resume_prompt else ''}in {repo}")
+        if on_live:
+            write("[reviewed on the live theme]")
         if resume_prompt:
             write(f"[resumed] {' '.join(resume_prompt.split())}")
         prompt = resume_prompt or (GO_LIVE_PROMPT if live else AGENT_PROMPT).format(key=key)
@@ -764,7 +798,7 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path, resumed: dict
 async def process_in_environment(
     client: httpx.AsyncClient, key: str, repo: Path, resumed: dict | None = None, note: str = ""
 ):
-    hooks = environment(key, repo)
+    hooks = repo_entry(key, repo)
     ours ="up" in hooks and not is_up(repo, hooks)
     try:
         if ours:

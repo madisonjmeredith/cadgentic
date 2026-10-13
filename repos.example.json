@@ -6,5 +6,9 @@
     "check": "curl -skf -o /dev/null https://lmn.test/",
     "up": "docker compose up -d",
     "down": "docker compose stop"
+  },
+  "PQR": {
+    "repo": "~/code/pqr-store",
+    "review": "live"
   }
 }

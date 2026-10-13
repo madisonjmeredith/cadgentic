@@ -37,6 +37,10 @@ Then fill out `repos.json`. It maps each Jira project key to the repo that proje
     "check": "curl -skf -o /dev/null https://lmn.test/",
     "up": "docker compose up -d",
     "down": "docker compose stop"
+  },
+  "PQR": {
+    "repo": "~/code/pqr-store",
+    "review": "live"
   }
 }
 ```
@@ -44,6 +48,8 @@ Then fill out `repos.json`. It maps each Jira project key to the repo that proje
 A path is the git repo itself, which isn't always the project root. A project with more than one repo lists them all (see [Known issues](#known-issues)). A ticket whose project isn't in the file is skipped with a notification. It's picked up on a later poll once the project is added.
 
 A project whose local site isn't left running, like one in a Docker stack, uses the longer form. `repo` is the path. `check`, `up`, and `down` are the commands Cadgentic uses to start that site before a run and stop it afterward (see [Local environments](#local-environments)).
+
+A Shopify store that hasn't launched uses the longer form too, with `"review": "live"`. Its work is deployed to the live theme for review instead of being left on a preview theme (see [Stores that haven't launched](#stores-that-havent-launched)).
 
 Both files are in `.gitignore` so your Jira token and repo paths stay out of the repo.
 
@@ -100,7 +106,7 @@ Each new ticket gets its own Claude Code session, and sessions run one at a time
 1. The ticket's project key picks the repo from `repos.json`.
 2. The ticket waits a random `DELAY_MIN` to `DELAY_MAX` seconds. It's then looked up again because a ticket can be reassigned or moved during the wait.
 3. If the project names a [local environment](#local-environments) that isn't up, Cadgentic starts it. It's stopped again when the session ends.
-4. The ticket is moved to `IN_PROGRESS_STATUS`, and a session starts in that repo in auto mode with the prompt `/ticket <key>`. Its system prompt says the run is unattended. The `ticket` and `ready-for-review` skills change what they do on that and nothing else.
+4. The ticket is moved to `IN_PROGRESS_STATUS`, and a session starts in that repo in auto mode with the prompt `/ticket <key>`. Its system prompt says the run is unattended. The `ticket` and `ready-for-review` skills change what they do on that. A [store that hasn't launched](#stores-that-havent-launched) adds one more line, which changes where the work is reviewed.
 5. When the session ends, the script looks the ticket up once more. If it's still assigned to you and still in progress, `/ticket` stopped early and the log has its last words. Otherwise it's recorded as handed off.
 
 A session can end a turn while it waits on a command it left running in the background, like a watch on a deploy. The run stays open until the command finishes and the session carries on. If nothing has woken the session `BACKGROUND_TIMEOUT` seconds after a turn (600 by default), the run ends and the command is stopped with it. That's the usual end for a run that never stopped its dev server. Raise the setting if your deploys take longer than that. A Magento Cloud deploy does. Waits on subagents aren't limited by it.
@@ -132,7 +138,7 @@ Questions are still answered in a run that holds its plan. Its repo isn't checke
 Three limits apply to every run:
 
 1. Its Jira writes stop at its own ticket. It can comment on that ticket, reassign it, and transition it. Every other Jira write is refused. `EXTRA_DISALLOWED_TOOLS` takes more tools out of the session, like a second Jira server a run should never reach.
-2. It can't get a person's approval. A tool call that still needs one is refused with a note that the run is unattended. The one exception is looking at a page in a browser while planning, which the script approves itself.
+2. It can't get a person's approval. A tool call that still needs one is refused with a note that the run is unattended. The script approves two things itself: (1) looking at a page in a browser while planning, and (2) the two deploy commands on a [store that hasn't launched](#stores-that-havent-launched).
 3. It can't run forever. `RUN_TIMEOUT` stops a run by the clock and `MAX_BUDGET_USD` stops it by cost.
 
 The Jira API token is also blanked in the session's environment so the agent's shell can't read it.
@@ -167,6 +173,41 @@ A few things to know when writing the commands:
 - Environments that bind the same ports can't be up together. Runs go one at a time so two of Cadgentic's never overlap. One you started yourself can still be in the way. Then `up` or `check` fails and the ticket waits for the next poll.
 
 Go-live runs don't start an environment. Anything that lives inside the session is still the agent's to start, like a dev server or a file watcher the skill runs in the background.
+
+### Stores that haven't launched
+
+A Shopify store that hasn't launched sits behind its storefront password. Its client reviews work on the live theme, so a preview theme link is the wrong thing to hand them. Mark that project in `repos.json`:
+
+```json
+"PQR": {
+  "repo": "~/code/pqr-store",
+  "review": "live"
+}
+```
+
+`live` is the only value. The file is read when a run starts, so the key applies from the next run on.
+
+A run on a marked project takes `/ticket`'s pre-launch flow:
+
+1. It checks the change on the pull request's preview theme before anything is merged.
+2. It merges the branch into `main` with `theme-sync` and pushes `main`. That deploys the live theme, and the Deploy workflow backs the theme up first. The push also merges the pull request.
+3. QA runs against the live theme.
+4. The handoff comment says the work is on the live theme and links the store's own URL with no preview theme ID.
+
+Two things have to be true for a run to take that flow: (1) the project is marked, and (2) the storefront still lands on `/password` when the run checks. An open storefront means the store has launched. The run then takes the usual preview flow and its report says the setting is out of date. Take the key out of `repos.json` when the store launches.
+
+Auto mode can refuse a push to `main` on a live-theme store as a production deploy. So for a marked project Cadgentic approves two commands itself:
+
+```sh
+~/.claude/scripts/theme-sync main --merge feature/<KEY>
+git push origin main
+```
+
+It approves them by their exact text and only in that project's repo. Either one with something chained onto it is still auto mode's call, and so is every other command. Each approval is a `[granted]` line in `logs/<KEY>.log`. A marked run's log also has `[reviewed on the live theme]` under its session line.
+
+A QA item that fails stays on the live theme until a fix round deploys, and anyone with the storefront password can see it. `/ticket` allows two fix rounds.
+
+When you run `/ticket` yourself it takes this flow only if you tell it the project is reviewed on the live theme.
 
 ### When a ticket is sent back
 
@@ -223,6 +264,8 @@ Nothing is approved or answered for the skill in these runs, and the ticket isn'
 A ticket that came back `ready`, `held`, `not-approved`, or `unknown` is looked at again once it changes in Jira. A poll doesn't come back to any other outcome. To run one of those again, pass its key with `go-live`.
 
 `GO_LIVE_EXTRA_JQL` is ANDed onto the search for approved tickets and nothing else. Use it to keep a project that `/go-live` doesn't cover out of this lane, e.g., `GO_LIVE_EXTRA_JQL='project not in (LMN)'`. Without it an approved ticket in that project is handed to `/go-live`, which can only stop, and the ticket is looked at again each time it changes in Jira. Passing a key with `go-live` still runs it.
+
+An approved ticket on a [store that hasn't launched](#stores-that-havent-launched) is already on the live theme, so `/go-live` has nothing to deploy. It confirms that the branch is in `main` and that the Deploy run for it succeeded. Then it posts the "deployed live" comment, assigns the ticket back, and moves it to Deployed. Trial mode doesn't hold that up, and the outcome is `deployed`. A ticket with deployment notes is still held. If the branch isn't in `main` because its run took the preview flow or stopped early, `/go-live` treats the ticket like any other. Leave a marked project out of `GO_LIVE_EXTRA_JQL`.
 
 Set `GO_LIVE=false` to leave approved tickets alone.
 
