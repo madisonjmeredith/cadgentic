@@ -1,6 +1,6 @@
 # Cadgentic
 
-Cadgentic polls Jira for tickets assigned to you and hands each one to Claude Code's `/ticket` command in the repo its Jira project maps to. A run plans the ticket, builds it, deploys it for review, checks it, and posts the handoff comment with nobody at the keyboard. A ticket that's sent back for more work gets another run. Once a ticket is approved, Cadgentic hands it to `/go-live`.
+Cadgentic polls Jira for tickets assigned to you and hands each one to Claude Code's `/ticket` command in the repo its Jira project maps to. A run plans the ticket, builds it, deploys it for review, checks it, and drafts the handoff comment for you to post, with nobody at the keyboard. A ticket that's sent back for more work gets another run. Once a ticket is approved, Cadgentic hands it to `/go-live`.
 
 ## Requirements
 
@@ -126,9 +126,9 @@ Three things that `/ticket` normally waits on go ahead in a run:
 
 1. The plan. It's saved to `plans/<KEY>.md` and approved.
 2. Questions. Each one gets the option marked as recommended, or the first one listed. The questions, the answers, and the alternatives are saved to `decisions/<KEY>.md`. `/ticket` also writes them up as a comment on the ticket's pull request when the repo is on GitHub or Bitbucket and the pull request exists. If that comment is missing when the run ends, the script posts the saved record in its place. It can only do that on GitHub.
-3. The handoff. `ready-for-review` posts the comment, assigns the ticket, and moves it to Testing. It holds the handoff when its own checks say the work isn't ready, like a QA pass that failed.
+3. The handoff, short of the comment. `ready-for-review` saves its draft of the comment to `~/Web/cadencelabs/drafts/<KEY>/handoff-<time>.md` and moves the ticket to Testing. When the pull request is on GitHub or Bitbucket, the draft goes on it too, under `## Handoff draft`. The ticket stays assigned to you, so Testing with your name on it means a draft is waiting. Edit it, add the screenshots it suggests, post it, and assign the reporter. The run never comments on the ticket. It holds the handoff when its own checks say the work isn't ready, like a QA pass that failed. A held draft is still saved, with the reason at the top, and the ticket stays In Progress.
 
-The reply on a research ticket never goes ahead. A research ticket asks for an answer instead of a change, like an assessment or an estimate. The run does the research, builds nothing, and saves a draft of the reply in `~/Downloads/<KEY>/`. It never posts the draft since the reply goes to the client as written, often with an hours estimate in it. The run ends `finished` with the draft in the log. Read it and post it yourself. `resume` won't post it either. To carry on in the session by hand, use `open`.
+The reply on a research ticket never goes ahead. A research ticket asks for an answer instead of a change, like an assessment or an estimate. The run does the research, builds nothing, and saves a draft of the reply in `~/Web/cadencelabs/drafts/<KEY>/`. It never posts the draft since the reply goes to the client as written, often with an hours estimate in it. The run ends `finished` with the draft in the log. Read it and post it yourself. `resume` won't post it either. To carry on in the session by hand, use `open`.
 
 Set `AUTO_APPROVE_PLAN=false` to hold plans instead. A run then ends once the plan is written, and the log prints the command that resumes the session so you can approve it:
 
@@ -142,7 +142,7 @@ Questions are still answered in a run that holds its plan. Its repo isn't checke
 
 Three limits apply to every run:
 
-1. Its Jira writes stop at its own ticket. It can comment on that ticket, reassign it, and transition it. Every other Jira write is refused. `EXTRA_DISALLOWED_TOOLS` takes more tools out of the session, like a second Jira server a run should never reach.
+1. Its Jira writes stop at its own ticket. A `/ticket` run can only transition it. A `/go-live` run can also comment on it and reassign it. Every other Jira write is refused. `EXTRA_DISALLOWED_TOOLS` takes more tools out of the session, like a second Jira server a run should never reach.
 2. It can't get a person's approval. A tool call that still needs one is refused with a note that the run is unattended. The script approves two things itself: (1) looking at a page in a browser while planning, and (2) the two deploy commands on a [store that hasn't launched](#stores-that-havent-launched).
 3. It can't run forever. `RUN_TIMEOUT` stops a run by the clock and `MAX_BUDGET_USD` stops it by cost.
 
@@ -222,7 +222,7 @@ A run on a marked project takes `/ticket`'s pre-launch flow:
 1. It checks the change on the pull request's preview theme before anything is merged.
 2. It merges the branch into `main` with `theme-sync` and pushes `main`. That deploys the live theme, and the Deploy workflow backs the theme up first. The push also merges the pull request.
 3. QA runs against the live theme.
-4. The handoff comment says the work is on the live theme and links the store's own URL with no preview theme ID.
+4. The handoff draft says the work is on the live theme and links the store's own URL with no preview theme ID.
 
 Two things have to be true for a run to take that flow: (1) the project is marked, and (2) the storefront still lands on `/password` when the run checks. An open storefront means the store has launched. The run then takes the usual preview flow and its report says the setting is out of date. Take the key out of `repos.json` when the store launches.
 
@@ -241,7 +241,7 @@ When you run `/ticket` yourself it takes this flow only if you tell it the proje
 
 ### When a ticket is sent back
 
-A ticket that was handed off comes back when a reviewer assigns it to you again and moves it to one of the `TRIGGER_STATUSES`. The search finds it there and it gets another run, with the same wait and the same checks as a new ticket.
+A ticket that was handed off comes back after you've posted its handoff and assigned the reporter, when a reviewer assigns it to you again and moves it to one of the `TRIGGER_STATUSES`. The search finds it there and it gets another run, with the same wait and the same checks as a new ticket.
 
 The run is a new session with the same `/ticket <key>` prompt. `/ticket` finds the work that's already in the repo and plans only what the ticket's latest comment asks for. If that comment is your own, there's no feedback to act on. The run stops there and is recorded as `finished`.
 
@@ -272,7 +272,7 @@ Questions answered before the run stopped stay in `decisions/<KEY>.md`. Any aske
 Each poll also looks for tickets that are approved to go live and hands them to `/go-live`, ahead of any new tickets. A ticket counts when it is or was assigned to you and one of these is true:
 
 1. It's in `APPROVED_STATUS`.
-2. It's in one of the `REVIEW_STATUSES`, and its latest comment from someone else says "approved" and is meant for you. That means the ticket is assigned to you or the comment tags you. Only tickets updated in the last 14 days are checked this way.
+2. It's in one of the `REVIEW_STATUSES`, and its latest comment from someone else says "approved" and is meant for you. That means the ticket is assigned to you or the comment tags you. The comment also has to be newer than the ticket's last `/ticket` run. A ticket with a draft waiting is in Testing and assigned to you, and the comments from before its run aren't approvals. Only tickets updated in the last 14 days are checked this way.
 
 That check only picks which tickets `/go-live` looks at. The skill does the real read of the approval and holds anything short of a plain go-ahead.
 
@@ -313,7 +313,7 @@ Everything the script writes sits next to it and is listed in `.gitignore`:
 | Status | Meaning |
 |---|---|
 | `running` | A run is in progress. |
-| `handed_off` | The run ended and the ticket has moved on from In Progress or to someone else. |
+| `handed_off` | The run ended and the ticket has moved on from In Progress or to someone else. A run that drafted its handoff leaves the ticket in Testing, assigned to you. |
 | `finished` | The run ended and the ticket is still yours and still In Progress. `/ticket` stopped before the handoff. A research ticket always ends this way since its reply is held for you to post. |
 | `planned` | The plan is waiting for approval (`AUTO_APPROVE_PLAN=false`). |
 | `failed` | The run errored, timed out, or was interrupted. |

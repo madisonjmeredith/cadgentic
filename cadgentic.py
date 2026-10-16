@@ -349,7 +349,7 @@ def ticket_text(ticket: dict) -> str:
     return " ".join(" ".join(parts).split())
 
 
-async def approved_by_comment(client: httpx.AsyncClient, ticket: dict) -> bool:
+async def approved_by_comment(client: httpx.AsyncClient, ticket: dict, since: str | None) -> bool:
     key, updated = ticket["key"], ticket["fields"].get("updated")
     if key in comment_reads and comment_reads[key][0] == updated:
         return comment_reads[key][1]
@@ -359,8 +359,12 @@ async def approved_by_comment(client: httpx.AsyncClient, ticket: dict) -> bool:
     text, mentions = [], set()
     adf_parts(latest.get("body"), text, mentions)
     for_me = (ticket["fields"].get("assignee") or {}).get("accountId") == me or me in mentions
-    comment_reads[key] = (updated, for_me and "approved" in " ".join(text).lower())
-    return comment_reads[key][1]
+    # A handoff stays in Testing assigned to me, so for_me alone would accept a pre-run approval.
+    approved = for_me and "approved" in " ".join(text).lower() and (
+        not since or datetime.fromisoformat(latest["created"]) > datetime.fromisoformat(since).astimezone()
+    )
+    comment_reads[key] = (updated, approved)
+    return approved
 
 
 def go_live_due(previous: dict | None, updated: str | None) -> bool:
@@ -372,7 +376,8 @@ def go_live_due(previous: dict | None, updated: str | None) -> bool:
 async def approved_tickets(client: httpx.AsyncClient, state: dict) -> list[dict]:
     found = {ticket["key"]: ticket for ticket in await search(client, go_live_jql([APPROVED_STATUS]))}
     for ticket in await search(client, go_live_jql(REVIEW_STATUSES, recent=True)):
-        if ticket["key"] not in found and await approved_by_comment(client, ticket):
+        since = state.get(ticket["key"], {}).get("finished_at")
+        if ticket["key"] not in found and await approved_by_comment(client, ticket, since):
             found[ticket["key"]] = ticket
     return [
         ticket for ticket in found.values()
@@ -566,20 +571,27 @@ def notify(message: str):
         )
 
 
-def jira_gate(key: str):
+def jira_gate(key: str, live: bool):
+    if live:
+        reason = f"A go-live run may comment on {key}, reassign it, and transition it, and nothing else in Jira."
+    else:
+        reason = (
+            f"A ticket run moves {key} to Testing and leaves the comment and the assignee to Madison. "
+            f"It may transition {key}, and nothing else in Jira."
+        )
+
     async def gate(hook_input, tool_use_id, context):
-        tool_input = hook_input["tool_input"]
+        tool, tool_input = hook_input["tool_name"], hook_input["tool_input"]
         allowed = str(tool_input.get("issueIdOrKey", "")).upper() == key
-        if allowed and hook_input["tool_name"].endswith("editJiraIssue"):
+        if allowed and not live:
+            allowed = tool.endswith("transitionJiraIssue")
+        elif allowed and tool.endswith("editJiraIssue"):
             allowed = set(tool_input.get("fields") or {}) == {"assignee"}
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow" if allowed else "deny",
-                "permissionDecisionReason": (
-                    f"An unattended run may comment on {key}, reassign it, and transition it, "
-                    "and nothing else in Jira. Pass the key as issueIdOrKey."
-                ),
+                "permissionDecisionReason": f"{reason} Pass the key as issueIdOrKey.",
             }
         }
 
@@ -663,7 +675,7 @@ async def run_ticket(
         else:
             briefing = UNATTENDED.format(key=key, plan=PLAN_APPROVED if AUTO_APPROVE_PLAN else PLAN_HELD)
         on_live = repo_entry(key, repo).get("review") == "live"
-        gates = [HookMatcher(matcher="|".join(JIRA_WRITE_TOOLS), hooks=[jira_gate(key)])]
+        gates = [HookMatcher(matcher="|".join(JIRA_WRITE_TOOLS), hooks=[jira_gate(key, live)])]
         if on_live:
             briefing += " " + REVIEW_LIVE
         if on_live and not live:
@@ -801,9 +813,9 @@ async def process(client: httpx.AsyncClient, key: str, repo: Path, resumed: dict
     resume = f"cd {repo} && claude --resume {session_id}"
     carry_on = f"python cadgentic.py resume {key}"
     if status == "handed_off":
-        log.info("  ✓ %s handed off for review", key)
+        log.info("  ✓ %s handoff drafted, in Testing for your review", key)
         log.info("    To review the session: %s", resume)
-        notify(f"{key} handed off for review")
+        notify(f"{key}: handoff drafted, in Testing for your review")
     elif status == "planned":
         log.info("  ✓ %s planned: %s", key, PLAN_DIR / f"{key}.md")
         log.info("    To approve it: %s", resume)
